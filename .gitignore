@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.py[cod]
+node_modules/
+cdk.out/
+test_lambda_function.py
+test_switchbot_lock.py
+switchbot_lock.py
