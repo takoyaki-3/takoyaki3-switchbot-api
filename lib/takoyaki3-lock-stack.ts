@@ -3,6 +3,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
@@ -33,20 +34,30 @@ export class Takoyaki3LockStack extends cdk.Stack {
       default: 'takoyaki3-auth',
     });
 
+    const deviceSettingsTable = new dynamodb.Table(this, 'DeviceSettingsTable', {
+      partitionKey: { name: 'device_id', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
     // Lambdaコード専用ディレクトリをそのままデプロイパッケージにする。
     const lockFunction = new lambda.Function(this, 'LockFunction', {
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: 'lambda_function.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda')),
-      timeout: cdk.Duration.seconds(15),
+      timeout: cdk.Duration.seconds(25),
       memorySize: 128,
       environment: {
         SWITCHBOT_TOKEN: switchBotToken.valueAsString,
         SWITCHBOT_SECRET: switchBotSecret.valueAsString,
+        DEVICE_SETTINGS_TABLE_NAME: deviceSettingsTable.tableName,
         ALLOWED_EMAILS: cdk.Fn.join(',', allowedEmails.valueAsList),
       },
     });
+    deviceSettingsTable.grantReadWriteData(lockFunction);
 
     // REST APIではネイティブJWT Authorizerがないため、同じコードの検証用ハンドラーを使う。
     const authFunction = new lambda.Function(this, 'AuthFunction', {
@@ -72,7 +83,7 @@ export class Takoyaki3LockStack extends cdk.Stack {
       },
       defaultCorsPreflightOptions: {
         allowHeaders: ['Authorization', 'Content-Type'],
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'PUT', 'OPTIONS'],
         allowOrigins: apigw.Cors.ALL_ORIGINS,
       },
     });
@@ -81,7 +92,7 @@ export class Takoyaki3LockStack extends cdk.Stack {
     const gatewayResponseHeaders = {
       'Access-Control-Allow-Origin': "'*'",
       'Access-Control-Allow-Headers': "'Authorization,Content-Type'",
-      'Access-Control-Allow-Methods': "'GET,POST,OPTIONS'",
+      'Access-Control-Allow-Methods': "'GET,POST,PUT,OPTIONS'",
     };
     api.addGatewayResponse('Default4xxResponse', {
       type: apigw.ResponseType.DEFAULT_4XX,
@@ -110,8 +121,11 @@ export class Takoyaki3LockStack extends cdk.Stack {
     const devices = api.root.addResource('devices');
     devices.addMethod('GET', integration, protectedMethodOptions);
     const device = devices.addResource('{device}');
+    device.addResource('settings').addMethod('PUT', integration, protectedMethodOptions);
     device.addResource('status').addMethod('GET', integration, protectedMethodOptions);
     device.addResource('actions').addMethod('POST', integration, protectedMethodOptions);
+    api.root.addResource('bulk-actions').addResource('home-on')
+      .addMethod('POST', integration, protectedMethodOptions);
 
     const webBucket = new s3.Bucket(this, 'WebBucket', {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -139,6 +153,7 @@ export class Takoyaki3LockStack extends cdk.Stack {
         responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
       },
       additionalBehaviors: {
+        'bulk-actions*': apiBehavior,
         'devices*': apiBehavior,
       },
     });

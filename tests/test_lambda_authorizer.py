@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "lambda"))
 
@@ -185,6 +185,63 @@ class FirebaseJwtTests(unittest.TestCase):
         self.assertEqual(devices[1]["deviceName"], "扇風機")
         self.assertEqual(devices[1]["actions"], ["on", "off"])
         self.assertFalse(devices[1]["supportsStatus"])
+
+    @patch.dict(os.environ, {
+        "ALLOWED_EMAILS": "owner@example.com",
+        "SWITCHBOT_TOKEN": "token",
+        "SWITCHBOT_SECRET": "secret",
+    })
+    @patch("lambda_function._set_bulk_enabled")
+    @patch("lambda_function.SwitchBotClient")
+    def test_bulk_setting_is_saved_by_api(self, client_class, set_bulk_enabled):
+        client_class.return_value.devices.return_value = [{
+            "deviceId": "fan-1", "deviceName": "扇風機", "kind": "power",
+            "actions": ["on", "off"], "supportsStatus": False,
+        }]
+        response = lambda_function.handler({
+            "httpMethod": "PUT",
+            "resource": "/devices/{device}/settings",
+            "pathParameters": {"device": "fan-1"},
+            "body": json.dumps({"bulkEnabled": True}),
+            "requestContext": {"authorizer": {
+                "sub": "firebase-user-1", "email": "owner@example.com",
+                "email_verified": "true",
+            }},
+        }, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        set_bulk_enabled.assert_called_once_with("fan-1", True)
+
+    @patch.dict(os.environ, {
+        "ALLOWED_EMAILS": "owner@example.com",
+        "SWITCHBOT_TOKEN": "token",
+        "SWITCHBOT_SECRET": "secret",
+    })
+    @patch("lambda_function._bulk_enabled_device_ids", return_value={"lock-1", "fan-1"})
+    @patch("lambda_function.SwitchBotClient")
+    def test_bulk_action_uses_only_api_configured_devices(self, client_class, _enabled):
+        client_class.return_value.devices.return_value = [
+            {"deviceId": "lock-1", "deviceName": "玄関", "kind": "lock",
+             "actions": ["lock", "unlock"], "supportsStatus": True},
+            {"deviceId": "fan-1", "deviceName": "扇風機", "kind": "power",
+             "actions": ["on", "off"], "supportsStatus": False},
+            {"deviceId": "light-1", "deviceName": "照明", "kind": "power",
+             "actions": ["on", "off"], "supportsStatus": False},
+        ]
+        response = lambda_function.handler({
+            "httpMethod": "POST",
+            "resource": "/bulk-actions/home-on",
+            "requestContext": {"authorizer": {
+                "sub": "firebase-user-1", "email": "owner@example.com",
+                "email_verified": "true",
+            }},
+        }, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        self.assertEqual(
+            client_class.return_value.command.call_args_list,
+            [call("lock-1", "unlock"), call("fan-1", "turnOn")],
+        )
 
 
 if __name__ == "__main__":

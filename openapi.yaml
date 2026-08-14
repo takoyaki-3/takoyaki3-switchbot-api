@@ -1,8 +1,8 @@
 openapi: 3.0.3
 info:
   title: Takoyaki3 SwitchBot API
-  version: 3.0.0
-  description: SwitchBotの名称・デバイス種別から操作能力を自動構成する、Firebase JWT保護API。
+  version: 3.1.0
+  description: SwitchBotの操作と、DynamoDBに保存する一括操作設定を提供するFirebase JWT保護API。
 servers:
   - url: https://irk08qz577.execute-api.ap-northeast-1.amazonaws.com/prod
 security:
@@ -69,6 +69,45 @@ paths:
         "403": {$ref: "#/components/responses/Forbidden"}
         "404": {$ref: "#/components/responses/NotFound"}
         "502": {$ref: "#/components/responses/SwitchBotFailure"}
+  /devices/{deviceId}/settings:
+    parameters:
+      - $ref: "#/components/parameters/DeviceId"
+    put:
+      operationId: updateDeviceSettings
+      summary: デバイスを一括操作の対象にするか設定
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [bulkEnabled]
+              additionalProperties: false
+              properties:
+                bulkEnabled: {type: boolean}
+      responses:
+        "200": {description: DynamoDBへの設定保存完了}
+        "400": {description: readonlyデバイスまたは不正な入力}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+        "502": {$ref: "#/components/responses/SwitchBotFailure"}
+  /bulk-actions/home-on:
+    post:
+      operationId: runHomeOnBulkAction
+      summary: APIに設定された全対象デバイスを一括操作
+      description: 対象のlockデバイスにはunlock、powerデバイスにはturnOnを送信します。
+      responses:
+        "200":
+          description: 一括操作結果。個別の失敗はresultsのok=falseで返します。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BulkActionResult"
+        "400": {description: 一括操作対象が未設定}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "502": {$ref: "#/components/responses/SwitchBotFailure"}
 components:
   securitySchemes:
     firebaseJwt:
@@ -86,7 +125,7 @@ components:
   schemas:
     Device:
       type: object
-      required: [deviceId, deviceName, deviceType, source, kind, actions, supportsStatus]
+      required: [deviceId, deviceName, deviceType, source, kind, actions, supportsStatus, bulkEnabled]
       properties:
         deviceId: {type: string}
         deviceName: {type: string, description: SwitchBotアプリで設定された名称}
@@ -97,6 +136,24 @@ components:
           type: array
           items: {type: string, enum: [lock, unlock, on, off]}
         supportsStatus: {type: boolean}
+        bulkEnabled: {type: boolean, description: DynamoDBに保存された一括操作対象フラグ}
+    BulkActionResult:
+      type: object
+      required: [ok, targetCount, failureCount, results]
+      properties:
+        ok: {type: boolean}
+        targetCount: {type: integer, minimum: 1}
+        failureCount: {type: integer, minimum: 0}
+        results:
+          type: array
+          items:
+            type: object
+            required: [deviceId, deviceName, action, ok]
+            properties:
+              deviceId: {type: string}
+              deviceName: {type: string}
+              action: {type: string, enum: [unlock, on]}
+              ok: {type: boolean}
     Error:
       type: object
       required: [message]
@@ -105,4 +162,4 @@ components:
     Unauthorized: {description: JWTがない、または検証失敗, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
     Forbidden: {description: 許可メールアドレスに含まれない, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
     NotFound: {description: SwitchBotアカウントに対象deviceIdがない, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
-    SwitchBotFailure: {description: SwitchBot API呼び出し失敗, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    SwitchBotFailure: {description: SwitchBot APIまたはデバイス設定ストアの呼び出し失敗, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}

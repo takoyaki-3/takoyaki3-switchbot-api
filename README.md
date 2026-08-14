@@ -4,6 +4,7 @@ Firebase Authenticationで認証した許可ユーザーが、SwitchBotデバイ
 
 - API: API Gateway REST API + Python 3.12 Lambda
 - デバイス情報: SwitchBot APIから都度取得
+- 一括操作設定: DynamoDBにデバイスID単位で保存
 - Web UI: 非公開S3バケット + CloudFront Origin Access Control
 - 認証: Firebase JWTを検証するLambda Authorizer
 - デプロイ: AWS CDK / GitHub Actions OIDC
@@ -29,6 +30,8 @@ SwitchBotの任意コマンドを中継する仕様にはしていません。Ke
 | GET | `/devices` | SwitchBot名称、種別、自動判定した操作能力の一覧 |
 | GET | `/devices/{deviceId}/status` | 物理デバイスの状態取得 |
 | POST | `/devices/{deviceId}/actions` | 自動判定された範囲内で操作 |
+| PUT | `/devices/{deviceId}/settings` | 一括操作対象フラグをDynamoDBへ保存 |
+| POST | `/bulk-actions/home-on` | APIに設定された対象を一括操作 |
 
 互換用の`/status`、`/lock`、`/unlock`は、一覧で最初に見つかった`lock`種別のデバイスを操作します。他の統合UIも同じAPIを利用できます。CORSは全オリジン（`*`）を許可します。
 
@@ -44,14 +47,16 @@ UIは以下をブラウザストレージへ保存しないステートレス構
 - 期限切れ・署名不正・形式不正のJWT: Lambda Authorizerの検証によりAPIが`401 Unauthorized`を返し、UIがJWTを破棄して認証画面へ自動リダイレクト
 - 許可リスト外のユーザー: 有効なJWTでも`403 Forbidden`を画面に表示し、認証画面とのリダイレクトループを防止
 - デバイス一覧: 毎回SwitchBot APIから取得
-- API URL: CloudFrontの`devices*`ビヘイビアで同一オリジンからAPI Gatewayへ転送
+- 一括操作設定: HTMLには保存せず、APIを通じてDynamoDBから取得・更新
+- API URL: CloudFrontの`devices*`／`bulk-actions*`ビヘイビアで同一オリジンからAPI Gatewayへ転送
 - スマートフォン表示: 1カラムのデバイスカードと大きなタップ領域に切り替え、画面端のセーフエリアにも対応
 - 表示順: ロックを常に一覧の先頭へ表示
-- 一括操作: 画面上部のボタンから、確認ダイアログを経て全ロックの解錠とライト／扇風機のONをまとめて実行
+- 一括操作対象: 各デバイスカードからAPIへ設定し、ロックは解錠、電源デバイスはONとして保存
+- 一括操作: 画面上部のボタンは`POST /bulk-actions/home-on`を1回だけ呼び、API側がDynamoDBの設定を読み取って実行
 
-一括操作は、API Gatewayのスロットリングによる失敗を避けるため、利用者からは1回の操作として受け付けつつ、対象デバイスへ順番に送信します。プラグやBotなど、ライト／扇風機以外の`power`デバイスは一括操作の対象に含めません。
+一括対象の選択、対象デバイスID、実行する操作の判定はすべてAPI側にあります。HTMLが保持するのは表示中のAPIレスポンスとJWTだけで、`localStorage`や`sessionStorage`は使用しません。別の統合UIから同じ設定API・一括操作APIを利用した場合も同じ結果になります。
 
-以前の版で作成したDynamoDBデバイス設定テーブルは、データ保護のためAWS上に保持されますが、この版からは利用しません。不要と確認できた場合に限り、AWS側で手動削除できます。
+DynamoDBテーブルはオンデマンド課金、AWS管理暗号化、ポイントインタイムリカバリ、削除時保持で構築します。以前の版で作成され、CloudFormationから既に切り離されたテーブルがある場合、それは新しい設定テーブルとは別に保持されます。
 
 ## ローカル確認とデプロイ
 

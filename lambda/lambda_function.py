@@ -35,6 +35,10 @@ class JwtVerificationError(RuntimeError):
     """Firebase JWTの検証に失敗した場合の例外。"""
 
 
+class DeviceSettingsError(RuntimeError):
+    """DynamoDBのデバイス設定操作に失敗した場合の例外。"""
+
+
 @dataclass(frozen=True)
 class Config:
     token: str
@@ -46,6 +50,7 @@ DEVICE_KINDS = {
     "power": {"on": "turnOn", "off": "turnOff"},
     "readonly": {},
 }
+_device_settings_table: Any | None = None
 
 POWER_DEVICE_KEYWORDS = (
     "bot", "plug", "light", "bulb", "fan", "humidifier", "air purifier",
@@ -375,6 +380,47 @@ def _request_json(event: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+def _settings_table() -> Any:
+    global _device_settings_table
+    if _device_settings_table is None:
+        import boto3
+        _device_settings_table = boto3.resource("dynamodb").Table(
+            os.environ["DEVICE_SETTINGS_TABLE_NAME"]
+        )
+    return _device_settings_table
+
+
+def _bulk_enabled_device_ids() -> set[str]:
+    try:
+        result: set[str] = set()
+        response = _settings_table().scan(ProjectionExpression="device_id")
+        result.update(str(item["device_id"]) for item in response.get("Items", []))
+        while response.get("LastEvaluatedKey"):
+            response = _settings_table().scan(
+                ProjectionExpression="device_id",
+                ExclusiveStartKey=response["LastEvaluatedKey"],
+            )
+            result.update(str(item["device_id"]) for item in response.get("Items", []))
+        return result
+    except Exception as exc:
+        raise DeviceSettingsError("Failed to read bulk action settings") from exc
+
+
+def _set_bulk_enabled(device_id: str, enabled: bool) -> None:
+    try:
+        if enabled:
+            _settings_table().put_item(Item={"device_id": device_id})
+        else:
+            _settings_table().delete_item(Key={"device_id": device_id})
+    except Exception as exc:
+        raise DeviceSettingsError("Failed to update bulk action setting") from exc
+
+
+def _with_bulk_settings(devices: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    enabled_ids = _bulk_enabled_device_ids()
+    return [{**device, "bulkEnabled": device["deviceId"] in enabled_ids} for device in devices]
+
+
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """API Gateway REST APIのメソッドとリソースに応じて処理する。"""
     route = f"{event.get('httpMethod', '')} {event.get('resource', event.get('path', ''))}"
@@ -386,7 +432,45 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         client = SwitchBotClient(_config())
         devices = client.devices()
         if route == "GET /devices":
+            devices = _with_bulk_settings(devices)
             return _response(200, {"devices": devices, "user": email})
+
+        if route == "POST /bulk-actions/home-on":
+            devices = _with_bulk_settings(devices)
+            targets = [
+                device for device in devices
+                if device["bulkEnabled"] and device["kind"] in ("lock", "power")
+            ]
+            if not targets:
+                return _response(400, {"message": "一括操作の対象デバイスが設定されていません"})
+            results: list[dict[str, Any]] = []
+            for device in targets:
+                action = "unlock" if device["kind"] == "lock" else "on"
+                command = DEVICE_KINDS[device["kind"]][action]
+                try:
+                    client.command(device["deviceId"], command)
+                    results.append({
+                        "deviceId": device["deviceId"],
+                        "deviceName": device["deviceName"],
+                        "action": action,
+                        "ok": True,
+                    })
+                except SwitchBotError:
+                    logger.exception("Bulk action failed for device %s", device["deviceId"])
+                    results.append({
+                        "deviceId": device["deviceId"],
+                        "deviceName": device["deviceName"],
+                        "action": action,
+                        "ok": False,
+                    })
+            failures = sum(not result["ok"] for result in results)
+            logger.info("Bulk action completed for %s: %d targets, %d failures", email, len(results), failures)
+            return _response(200, {
+                "ok": failures == 0,
+                "targetCount": len(results),
+                "failureCount": failures,
+                "results": results,
+            })
 
         device_id = str((event.get("pathParameters") or {}).get("device", ""))
         if route in ("GET /status", "POST /lock", "POST /unlock"):
@@ -395,6 +479,22 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
             definition = next((item for item in devices if item["deviceId"] == device_id), None)
         if definition is None:
             return _response(404, {"message": "指定されたSwitchBotデバイスはありません"})
+
+        if route == "PUT /devices/{device}/settings":
+            try:
+                enabled = _request_json(event).get("bulkEnabled")
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                return _response(400, {"message": "JSONリクエストが不正です"})
+            if not isinstance(enabled, bool):
+                return _response(400, {"message": "bulkEnabledにはbooleanを指定してください"})
+            if enabled and definition["kind"] not in ("lock", "power"):
+                return _response(400, {"message": "このデバイスは一括操作の対象にできません"})
+            _set_bulk_enabled(device_id, enabled)
+            return _response(200, {
+                "ok": True,
+                "deviceId": device_id,
+                "bulkEnabled": enabled,
+            })
 
         if route == "GET /status":
             return _response(200, {**client.status(definition["deviceId"]), "user": email})
@@ -432,7 +532,7 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                 "action": action,
             })
         return _response(404, {"message": "Not found"})
-    except (SwitchBotError, KeyError, ValueError, json.JSONDecodeError):
-        # 上流APIの応答やシークレット内容は利用者へ返さず、CloudWatch Logsだけに記録する。
-        logger.exception("SwitchBot operation failed for %s", email)
-        return _response(502, {"message": "SwitchBotの操作に失敗しました"})
+    except (SwitchBotError, DeviceSettingsError, KeyError, ValueError, json.JSONDecodeError):
+        # 上流API、設定ストア、シークレットの詳細は利用者へ返さずCloudWatch Logsだけに記録する。
+        logger.exception("API operation failed for %s", email)
+        return _response(502, {"message": "APIの処理に失敗しました"})

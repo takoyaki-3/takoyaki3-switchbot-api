@@ -14,13 +14,13 @@
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0 28px}
     button{font:inherit;min-height:46px;border:0;border-radius:12px;padding:.75rem 1rem;background:#e97443;color:#17100c;font-weight:750;cursor:pointer;touch-action:manipulation}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
     .bulk-panel{margin:20px 0;padding:16px}.bulk-action{width:100%;min-height:64px;background:#b94739;color:#fff;font-size:1.05rem}.bulk-panel p{margin:.65rem 0 0}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;margin:.8rem 0;color:#d8cfc4;overflow-wrap:anywhere}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}.bulk-setting{display:flex;align-items:center;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid #343630;color:#d8cfc4}.bulk-setting input{width:24px;height:24px;margin:0;accent-color:#e97443}.status{min-height:1.4em;margin:.8rem 0;color:#d8cfc4;overflow-wrap:anywhere}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
     @media(max-width:600px){body{padding-top:16px}header{align-items:flex-start}header>button{min-width:7rem}.panel,.card{border-radius:15px;padding:15px}.grid{grid-template-columns:1fr;gap:12px}.actions button{flex:1 1 calc(50% - 8px);min-height:52px}.bulk-panel{margin:14px 0}.bulk-action{min-height:68px}h2{margin:.5rem 0}}
   </style>
 </head>
 <body><main>
   <header><div><p class="muted">STATELESS DEVICE CONTROL</p><h1>Takoyaki3 Home</h1></div><button id="reload" class="secondary">再読み込み</button></header>
-  <section class="panel bulk-panel"><button id="bulk-on" class="bulk-action" disabled>すべて解錠・ライト／扇風機ON</button><p id="bulk-summary" class="muted">デバイス一覧を読み込んでいます。</p></section>
+  <section class="panel bulk-panel"><button id="bulk-on" class="bulk-action" disabled>設定対象を一括操作</button><p id="bulk-summary" class="muted">デバイス一覧を読み込んでいます。</p></section>
   <div id="notice" class="notice" role="status" aria-live="polite"></div>
   <section><div class="row"><h2>SwitchBotデバイス</h2><p class="muted">名称と操作種別はSwitchBotから自動取得します。</p></div><div id="devices" class="grid"><div class="empty panel">認証を確認しています…</div></div></section>
 </main><script>
@@ -42,12 +42,11 @@ async function api(path,options={}){
 }
 const ACTION_LABELS={lock:'施錠',unlock:'解錠',on:'ON',off:'OFF'};
 const KIND_LABELS={lock:'鍵',power:'電源',readonly:'参照のみ'};
-const isLightOrFan=device=>/(light|bulb|fan)/i.test(device.deviceType||'');
-const bulkTargets=()=>currentDevices.filter(device=>device.kind==='lock'||(device.kind==='power'&&isLightOrFan(device)));
+const bulkTargets=()=>currentDevices.filter(device=>device.bulkEnabled);
 function updateBulkAction(){
   const targets=bulkTargets(),locks=targets.filter(device=>device.kind==='lock').length,power=targets.length-locks;
   $('#bulk-on').disabled=!targets.length;
-  $('#bulk-summary').textContent=targets.length?`ロック ${locks}台を解錠、ライト／扇風機 ${power}台をONにします。`:'一括操作できるデバイスはありません。';
+  $('#bulk-summary').textContent=targets.length?`設定済み: ロック ${locks}台を解錠、電源デバイス ${power}台をONにします。`:'各デバイスの「一括操作の対象」を有効にしてください。';
 }
 function render(devices){
   const root=$('#devices');root.replaceChildren();
@@ -62,7 +61,15 @@ function render(devices){
     for(const action of device.actions){const label=ACTION_LABELS[action]||action;const button=document.createElement('button');button.textContent=label;button.onclick=async()=>{if(action==='unlock'&&!confirm(`${device.deviceName}を解錠しますか？`))return;button.disabled=true;try{await api(`/devices/${encodeURIComponent(device.deviceId)}/actions`,{method:'POST',body:JSON.stringify({action})});status.textContent=`${label}を送信しました`}catch(e){status.textContent=e.message}finally{button.disabled=false}};buttons.append(button)}
     if(device.supportsStatus){const refresh=document.createElement('button');refresh.className='secondary';refresh.textContent='状態';refresh.onclick=async()=>{refresh.disabled=true;try{const value=await api(`/devices/${encodeURIComponent(device.deviceId)}/status`);status.textContent=value.lockState||value.power||value.deviceMode||JSON.stringify(value)}catch(e){status.textContent=e.message}finally{refresh.disabled=false}};buttons.append(refresh)}
     if(!device.actions.length&&!device.supportsStatus)status.textContent='このAPIで利用できる操作はありません';
-    card.append(title,meta,status,buttons);root.append(card)
+    card.append(title,meta,status,buttons);
+    if(device.kind==='lock'||device.kind==='power'){
+      const setting=document.createElement('label');setting.className='bulk-setting';
+      const checkbox=document.createElement('input');checkbox.type='checkbox';checkbox.checked=Boolean(device.bulkEnabled);
+      const text=document.createElement('span');text.textContent=device.kind==='lock'?'一括操作の対象（解錠）':'一括操作の対象（電源ON）';
+      checkbox.onchange=async()=>{const enabled=checkbox.checked;checkbox.disabled=true;try{await api(`/devices/${encodeURIComponent(device.deviceId)}/settings`,{method:'PUT',body:JSON.stringify({bulkEnabled:enabled})});device.bulkEnabled=enabled;updateBulkAction();status.textContent='一括操作設定を保存しました'}catch(e){checkbox.checked=!enabled;status.textContent=e.message}finally{checkbox.disabled=false}};
+      setting.append(checkbox,text);card.append(setting)
+    }
+    root.append(card)
   }
 }
 async function loadDevices(){try{notice('読み込み中…');const data=await api('/devices');currentDevices=data.devices;render(currentDevices);updateBulkAction();notice('')}catch(e){notice(e.message)}}
@@ -70,16 +77,9 @@ $('#reload').onclick=loadDevices;
 $('#bulk-on').onclick=async()=>{
   const targets=bulkTargets();if(!targets.length)return;
   const names=targets.map(device=>device.deviceName||device.deviceId).join('、');
-  if(!confirm(`次のデバイスを一括操作します。\n\n${names}\n\nすべてのロックを解錠し、ライト／扇風機をONにしますか？`))return;
-  const button=$('#bulk-on');button.disabled=true;const failures=[];
-  for(let index=0;index<targets.length;index++){
-    const device=targets[index],action=device.kind==='lock'?'unlock':'on';
-    button.textContent=`一括操作中 ${index+1}/${targets.length}`;
-    try{await api(`/devices/${encodeURIComponent(device.deviceId)}/actions`,{method:'POST',body:JSON.stringify({action})})}catch(e){failures.push(`${device.deviceName}: ${e.message}`)}
-    if(index<targets.length-1)await new Promise(resolve=>setTimeout(resolve,1100));
-  }
-  button.textContent='すべて解錠・ライト／扇風機ON';updateBulkAction();
-  notice(failures.length?`一部の操作に失敗しました: ${failures.join(' / ')}`:`${targets.length}台へ一括操作を送信しました`);
+  if(!confirm(`APIに設定された次のデバイスを一括操作します。\n\n${names}\n\nロックは解錠、電源デバイスはONにしますか？`))return;
+  const button=$('#bulk-on');button.disabled=true;button.textContent='一括操作中…';
+  try{const result=await api('/bulk-actions/home-on',{method:'POST',body:'{}'});const failures=result.results.filter(item=>!item.ok).map(item=>item.deviceName);notice(failures.length?`操作失敗: ${failures.join('、')}`:`${result.targetCount}台へ一括操作を送信しました`)}catch(e){notice(e.message)}finally{button.textContent='設定対象を一括操作';updateBulkAction()}
 };
 if(jwt)loadDevices();else login();
 </script></body></html>
