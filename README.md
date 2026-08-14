@@ -81,12 +81,9 @@ Firebase IDトークンは最長約1時間有効で、API Gateway JWT Authorizer
 
 GitHubリポジトリに次の設定を登録してください。
 
-Repository Variables:
-
-- `AWS_ROLE_ARN`: GitHub Actionsが引き受けるIAMロールのARN
-
 Repository Secrets:
 
+- `AWS_ROLE_ARN`: GitHub ActionsがOIDCで引き受けるIAMロールのARN
 - `SWITCHBOT_TOKEN`: SwitchBot APIトークン
 - `SWITCHBOT_SECRET`: SwitchBot API署名用シークレット
 - `SWITCHBOT_DEVICE_ID`: SwitchBotロックのデバイスID

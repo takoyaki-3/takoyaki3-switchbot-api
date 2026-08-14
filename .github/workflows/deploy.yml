@@ -21,7 +21,7 @@ jobs:
     timeout-minutes: 30
     env:
       AWS_REGION: ap-northeast-1
-      AWS_ROLE_ARN: ${{ vars.AWS_ROLE_ARN }}
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       SWITCHBOT_TOKEN: ${{ secrets.SWITCHBOT_TOKEN }}
       SWITCHBOT_SECRET: ${{ secrets.SWITCHBOT_SECRET }}
       SWITCHBOT_DEVICE_ID: ${{ secrets.SWITCHBOT_DEVICE_ID }}
