@@ -8,17 +8,20 @@
   <title>Takoyaki3 Home</title>
   <style>
     :root{font-family:system-ui,sans-serif;color:#f7f3eb;background:#101110;color-scheme:dark}*{box-sizing:border-box}
-    body{margin:0;min-height:100vh;padding:28px 18px;background:radial-gradient(circle at 10% 0,#6e342755,transparent 35rem),#101110}
+    body{margin:0;min-height:100vh;padding:28px max(18px,env(safe-area-inset-right)) max(48px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));background:radial-gradient(circle at 10% 0,#6e342755,transparent 35rem),#101110}
     main{width:min(960px,100%);margin:auto}header,.row{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
     h1{margin:.2rem 0;font-size:clamp(1.6rem,5vw,2.5rem)}h2{font-size:1.1rem}p{color:#bbb4aa}.panel,.card{background:#1b1c1a;border:1px solid #343630;border-radius:18px;padding:18px;box-shadow:0 12px 35px #0003}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0 28px}
-    button{font:inherit;border:0;border-radius:10px;padding:.72rem .85rem;background:#e97443;color:#17100c;font-weight:700;cursor:pointer}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;color:#d8cfc4}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
+    button{font:inherit;min-height:46px;border:0;border-radius:12px;padding:.75rem 1rem;background:#e97443;color:#17100c;font-weight:750;cursor:pointer;touch-action:manipulation}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
+    .bulk-panel{margin:20px 0;padding:16px}.bulk-action{width:100%;min-height:64px;background:#b94739;color:#fff;font-size:1.05rem}.bulk-panel p{margin:.65rem 0 0}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;margin:.8rem 0;color:#d8cfc4;overflow-wrap:anywhere}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
+    @media(max-width:600px){body{padding-top:16px}header{align-items:flex-start}header>button{min-width:7rem}.panel,.card{border-radius:15px;padding:15px}.grid{grid-template-columns:1fr;gap:12px}.actions button{flex:1 1 calc(50% - 8px);min-height:52px}.bulk-panel{margin:14px 0}.bulk-action{min-height:68px}h2{margin:.5rem 0}}
   </style>
 </head>
 <body><main>
   <header><div><p class="muted">STATELESS DEVICE CONTROL</p><h1>Takoyaki3 Home</h1></div><button id="reload" class="secondary">再読み込み</button></header>
-  <div id="notice" class="notice"></div>
+  <section class="panel bulk-panel"><button id="bulk-on" class="bulk-action" disabled>すべて解錠・ライト／扇風機ON</button><p id="bulk-summary" class="muted">デバイス一覧を読み込んでいます。</p></section>
+  <div id="notice" class="notice" role="status" aria-live="polite"></div>
   <section><div class="row"><h2>SwitchBotデバイス</h2><p class="muted">名称と操作種別はSwitchBotから自動取得します。</p></div><div id="devices" class="grid"><div class="empty panel">認証を確認しています…</div></div></section>
 </main><script>
 // CloudFrontがdevicesパスをAPI Gatewayへ転送するため、環境固有URLは不要。
@@ -29,6 +32,7 @@ let jwt=(params.get('jwt')||'').trim();
 if(params.has('jwt'))history.replaceState(null,'',location.pathname+location.hash);
 const $=selector=>document.querySelector(selector);
 const notice=message=>$('#notice').textContent=message;
+let currentDevices=[];
 function login(){location.replace(LOGIN_URL)}
 async function api(path,options={}){
   const response=await fetch(API+path,{...options,headers:{Authorization:'Bearer '+jwt,'Content-Type':'application/json',...(options.headers||{})}});
@@ -38,10 +42,18 @@ async function api(path,options={}){
 }
 const ACTION_LABELS={lock:'施錠',unlock:'解錠',on:'ON',off:'OFF'};
 const KIND_LABELS={lock:'鍵',power:'電源',readonly:'参照のみ'};
+const isLightOrFan=device=>/(light|bulb|fan)/i.test(device.deviceType||'');
+const bulkTargets=()=>currentDevices.filter(device=>device.kind==='lock'||(device.kind==='power'&&isLightOrFan(device)));
+function updateBulkAction(){
+  const targets=bulkTargets(),locks=targets.filter(device=>device.kind==='lock').length,power=targets.length-locks;
+  $('#bulk-on').disabled=!targets.length;
+  $('#bulk-summary').textContent=targets.length?`ロック ${locks}台を解錠、ライト／扇風機 ${power}台をONにします。`:'一括操作できるデバイスはありません。';
+}
 function render(devices){
   const root=$('#devices');root.replaceChildren();
   if(!devices.length){root.innerHTML='<div class="empty panel">SwitchBotデバイスはありません</div>';return}
-  for(const device of devices){
+  const sorted=[...devices].sort((a,b)=>(a.kind==='lock'?0:1)-(b.kind==='lock'?0:1)||(a.deviceName||'').localeCompare(b.deviceName||'','ja'));
+  for(const device of sorted){
     const card=document.createElement('article');card.className='card';
     const title=document.createElement('h2');title.textContent=device.deviceName||'(名称なし)';
     const meta=document.createElement('p');meta.className='muted';meta.textContent=`${device.deviceType} · ${KIND_LABELS[device.kind]} · ${device.source}`;
@@ -53,7 +65,21 @@ function render(devices){
     card.append(title,meta,status,buttons);root.append(card)
   }
 }
-async function loadDevices(){try{notice('読み込み中…');const data=await api('/devices');render(data.devices);notice('')}catch(e){notice(e.message)}}
+async function loadDevices(){try{notice('読み込み中…');const data=await api('/devices');currentDevices=data.devices;render(currentDevices);updateBulkAction();notice('')}catch(e){notice(e.message)}}
 $('#reload').onclick=loadDevices;
+$('#bulk-on').onclick=async()=>{
+  const targets=bulkTargets();if(!targets.length)return;
+  const names=targets.map(device=>device.deviceName||device.deviceId).join('、');
+  if(!confirm(`次のデバイスを一括操作します。\n\n${names}\n\nすべてのロックを解錠し、ライト／扇風機をONにしますか？`))return;
+  const button=$('#bulk-on');button.disabled=true;const failures=[];
+  for(let index=0;index<targets.length;index++){
+    const device=targets[index],action=device.kind==='lock'?'unlock':'on';
+    button.textContent=`一括操作中 ${index+1}/${targets.length}`;
+    try{await api(`/devices/${encodeURIComponent(device.deviceId)}/actions`,{method:'POST',body:JSON.stringify({action})})}catch(e){failures.push(`${device.deviceName}: ${e.message}`)}
+    if(index<targets.length-1)await new Promise(resolve=>setTimeout(resolve,1100));
+  }
+  button.textContent='すべて解錠・ライト／扇風機ON';updateBulkAction();
+  notice(failures.length?`一部の操作に失敗しました: ${failures.join(' / ')}`:`${targets.length}台へ一括操作を送信しました`);
+};
 if(jwt)loadDevices();else login();
 </script></body></html>
