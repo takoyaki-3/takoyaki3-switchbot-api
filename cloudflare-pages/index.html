@@ -12,25 +12,16 @@
     main{width:min(960px,100%);margin:auto}header,.row{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
     h1{margin:.2rem 0;font-size:clamp(1.6rem,5vw,2.5rem)}h2{font-size:1.1rem}p{color:#bbb4aa}.panel,.card{background:#1b1c1a;border:1px solid #343630;border-radius:18px;padding:18px;box-shadow:0 12px 35px #0003}
     .auth{margin:22px 0}.auth input{flex:1;min-width:240px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0 28px}
-    input,select,button{font:inherit;border-radius:10px;padding:.72rem .85rem}input,select{border:1px solid #4a4c45;background:#111;color:inherit}button{border:0;background:#e97443;color:#17100c;font-weight:700;cursor:pointer}button.secondary{background:#343731;color:#eee}button.danger{background:#71362f;color:#fff}button:disabled{opacity:.45;cursor:wait}
-    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;color:#d8cfc4}.muted{font-size:.84rem;color:#999187}.settings-grid{display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:10px;align-items:end}@media(max-width:700px){.settings-grid{grid-template-columns:1fr}}
-    label{display:grid;gap:6px;color:#c8c0b6;font-size:.86rem}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
+    input,button{font:inherit;border-radius:10px;padding:.72rem .85rem}input{border:1px solid #4a4c45;background:#111;color:inherit}button{border:0;background:#e97443;color:#17100c;font-weight:700;cursor:pointer}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
+    .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;color:#d8cfc4}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
   </style>
 </head>
 <body><main>
   <header><div><p class="muted">STATELESS DEVICE CONTROL</p><h1>Takoyaki3 Home</h1></div><button id="reload" class="secondary" disabled>再読み込み</button></header>
   <section class="panel auth"><div class="row"><input id="jwt" type="password" autocomplete="off" placeholder="Firebase JWTを貼り付け"><button id="connect">接続</button></div><p class="muted">JWTはブラウザストレージに保存されず、このページを閉じると破棄されます。</p><div id="notice" class="notice"></div></section>
-  <section><h2>デバイス</h2><div id="devices" class="grid"><div class="empty panel">JWTを入力して接続してください</div></div></section>
-  <section class="panel"><div class="row"><div><h2>デバイス設定</h2><p class="muted">SwitchBotアカウントの一覧から、APIで使う名称と操作種別を設定します。</p></div><button id="catalog" class="secondary" disabled>一覧を取得</button></div>
-    <div class="settings-grid">
-      <label>APIで使う名称<input id="alias" maxlength="64" placeholder="例: 玄関、リビング照明"></label>
-      <label>SwitchBotデバイス<select id="physical"><option value="">一覧を取得してください</option></select></label>
-      <label>操作種別<select id="kind"><option value="lock">鍵（施錠・解錠）</option><option value="power">電源（ON・OFF）</option></select></label>
-      <button id="save" disabled>設定を保存</button>
-    </div>
-  </section>
+  <section><div class="row"><h2>SwitchBotデバイス</h2><p class="muted">名称と操作種別はSwitchBotから自動取得します。</p></div><div id="devices" class="grid"><div class="empty panel">JWTを入力して接続してください</div></div></section>
 </main><script>
-// CloudFrontがcatalog/devicesパスをAPI Gatewayへ転送するため、環境固有URLは不要。
+// CloudFrontがdevicesパスをAPI Gatewayへ転送するため、環境固有URLは不要。
 const API='';
 let jwt='';
 const $=selector=>document.querySelector(selector);
@@ -40,25 +31,24 @@ async function api(path,options={}){
   let body={};try{body=await response.json()}catch{}
   if(!response.ok)throw new Error(body.message||`API error (${response.status})`);return body;
 }
-function actionsFor(device){return device.kind==='lock'?[['施錠','lock'],['解錠','unlock']]:[['ON','on'],['OFF','off']]}
+const ACTION_LABELS={lock:'施錠',unlock:'解錠',on:'ON',off:'OFF'};
+const KIND_LABELS={lock:'鍵',power:'電源',readonly:'参照のみ'};
 function render(devices){
   const root=$('#devices');root.replaceChildren();
-  if(!devices.length){root.innerHTML='<div class="empty panel">設定済みデバイスはありません</div>';return}
+  if(!devices.length){root.innerHTML='<div class="empty panel">SwitchBotデバイスはありません</div>';return}
   for(const device of devices){
     const card=document.createElement('article');card.className='card';
-    const title=document.createElement('h2');title.textContent=device.device_name;
-    const meta=document.createElement('p');meta.className='muted';meta.textContent=`${device.switchbot_name||device.device_id} · ${device.device_type||device.kind}`;
+    const title=document.createElement('h2');title.textContent=device.deviceName||'(名称なし)';
+    const meta=document.createElement('p');meta.className='muted';meta.textContent=`${device.deviceType} · ${KIND_LABELS[device.kind]} · ${device.source}`;
     const status=document.createElement('div');status.className='status';status.textContent='状態未取得';
     const buttons=document.createElement('div');buttons.className='actions';
-    for(const [label,action] of actionsFor(device)){const button=document.createElement('button');button.textContent=label;button.onclick=async()=>{if(action==='unlock'&&!confirm(`${device.device_name}を解錠しますか？`))return;button.disabled=true;try{await api(`/devices/${encodeURIComponent(device.device_name)}/actions`,{method:'POST',body:JSON.stringify({action})});status.textContent=`${label}を送信しました`}catch(e){status.textContent=e.message}finally{button.disabled=false}};buttons.append(button)}
-    const refresh=document.createElement('button');refresh.className='secondary';refresh.textContent='状態';refresh.onclick=async()=>{refresh.disabled=true;try{const value=await api(`/devices/${encodeURIComponent(device.device_name)}/status`);status.textContent=value.lockState||value.power||value.deviceMode||JSON.stringify(value)}catch(e){status.textContent=e.message}finally{refresh.disabled=false}};buttons.append(refresh);
-    const remove=document.createElement('button');remove.className='danger';remove.textContent='設定削除';remove.onclick=async()=>{if(!confirm(`${device.device_name}の設定を削除しますか？`))return;try{await api(`/devices/${encodeURIComponent(device.device_name)}`,{method:'DELETE'});await loadDevices()}catch(e){notice(e.message)}};buttons.append(remove);
+    for(const action of device.actions){const label=ACTION_LABELS[action]||action;const button=document.createElement('button');button.textContent=label;button.onclick=async()=>{if(action==='unlock'&&!confirm(`${device.deviceName}を解錠しますか？`))return;button.disabled=true;try{await api(`/devices/${encodeURIComponent(device.deviceId)}/actions`,{method:'POST',body:JSON.stringify({action})});status.textContent=`${label}を送信しました`}catch(e){status.textContent=e.message}finally{button.disabled=false}};buttons.append(button)}
+    if(device.supportsStatus){const refresh=document.createElement('button');refresh.className='secondary';refresh.textContent='状態';refresh.onclick=async()=>{refresh.disabled=true;try{const value=await api(`/devices/${encodeURIComponent(device.deviceId)}/status`);status.textContent=value.lockState||value.power||value.deviceMode||JSON.stringify(value)}catch(e){status.textContent=e.message}finally{refresh.disabled=false}};buttons.append(refresh)}
+    if(!device.actions.length&&!device.supportsStatus)status.textContent='このAPIで利用できる操作はありません';
     card.append(title,meta,status,buttons);root.append(card)
   }
 }
 async function loadDevices(){try{notice('読み込み中…');const data=await api('/devices');render(data.devices);notice('')}catch(e){notice(e.message)}}
-$('#connect').onclick=async()=>{jwt=$('#jwt').value.trim();if(!jwt)return notice('JWTを入力してください');$('#reload').disabled=$('#catalog').disabled=$('#save').disabled=false;await loadDevices()};
+$('#connect').onclick=async()=>{jwt=$('#jwt').value.trim();if(!jwt)return notice('JWTを入力してください');$('#reload').disabled=false;await loadDevices()};
 $('#reload').onclick=loadDevices;
-$('#catalog').onclick=async()=>{try{notice('SwitchBotデバイス一覧を取得中…');const data=await api('/catalog/devices');const select=$('#physical');select.replaceChildren();for(const device of data.devices){const option=document.createElement('option');option.value=device.deviceId;option.textContent=`${device.deviceName||'(名称なし)'} — ${device.deviceType} [${device.source}]`;select.append(option)}notice(`${data.devices.length}件取得しました`)}catch(e){notice(e.message)}};
-$('#save').onclick=async()=>{const name=$('#alias').value.trim(),deviceId=$('#physical').value,kind=$('#kind').value;if(!name||!deviceId)return notice('名称とデバイスを選択してください');try{await api(`/devices/${encodeURIComponent(name)}`,{method:'PUT',body:JSON.stringify({deviceId,kind})});$('#alias').value='';notice(`${name}を保存しました`);await loadDevices()}catch(e){notice(e.message)}};
 </script></body></html>

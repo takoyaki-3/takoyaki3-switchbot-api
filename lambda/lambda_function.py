@@ -35,10 +35,6 @@ class JwtVerificationError(RuntimeError):
     """Firebase JWTの検証に失敗した場合の例外。"""
 
 
-class DeviceStoreError(RuntimeError):
-    """DynamoDBのデバイス設定操作に失敗した場合の例外。"""
-
-
 @dataclass(frozen=True)
 class Config:
     token: str
@@ -48,8 +44,26 @@ class Config:
 DEVICE_KINDS = {
     "lock": {"lock": "lock", "unlock": "unlock"},
     "power": {"on": "turnOn", "off": "turnOff"},
+    "readonly": {},
 }
-_device_table: Any | None = None
+
+POWER_DEVICE_KEYWORDS = (
+    "bot", "plug", "light", "bulb", "fan", "humidifier", "air purifier",
+    "air conditioner", "tv", "speaker", "dvd", "set top box", "streamer",
+    "projector", "water heater", "relay switch", "candle warmer",
+)
+
+
+def _device_capabilities(device_type: str, source: str) -> tuple[str, list[str]]:
+    """SwitchBot公式のdeviceTypeから、このAPIで安全に公開する操作を決める。"""
+    normalized = device_type.strip().lower()
+    if "lock" in normalized and "keypad" not in normalized:
+        return "lock", list(DEVICE_KINDS["lock"])
+    if source == "infrared" and normalized != "others":
+        return "power", list(DEVICE_KINDS["power"])
+    if any(keyword in normalized for keyword in POWER_DEVICE_KEYWORDS):
+        return "power", list(DEVICE_KINDS["power"])
+    return "readonly", []
 
 
 class SwitchBotClient:
@@ -110,9 +124,9 @@ class SwitchBotClient:
         result = self._request("GET", f"/devices/{device_id}/status")
         return result.get("body", {})
 
-    def devices(self) -> list[dict[str, str]]:
+    def devices(self) -> list[dict[str, Any]]:
         body = self._request("GET", "/devices").get("body", {})
-        devices: list[dict[str, str]] = []
+        devices: list[dict[str, Any]] = []
         for source, key in (
             ("physical", "deviceList"),
             ("infrared", "infraredRemoteList"),
@@ -120,11 +134,16 @@ class SwitchBotClient:
             for item in body.get(key, []):
                 if not isinstance(item, dict) or not item.get("deviceId"):
                     continue
+                device_type = str(item.get("deviceType", ""))
+                kind, actions = _device_capabilities(device_type, source)
                 devices.append({
                     "deviceId": str(item["deviceId"]),
                     "deviceName": str(item.get("deviceName", "")),
-                    "deviceType": str(item.get("deviceType", "")),
+                    "deviceType": device_type,
                     "source": source,
+                    "kind": kind,
+                    "actions": actions,
+                    "supportsStatus": source == "physical",
                 })
         return devices
 
@@ -344,56 +363,6 @@ def _authorized(event: dict[str, Any]) -> tuple[bool, str]:
     return bool(subject and email and verified and email in allowed), email
 
 
-def _table() -> Any:
-    global _device_table
-    if _device_table is None:
-        import boto3
-        _device_table = boto3.resource("dynamodb").Table(os.environ["DEVICE_TABLE_NAME"])
-    return _device_table
-
-
-def _list_configured_devices() -> list[dict[str, Any]]:
-    try:
-        items: list[dict[str, Any]] = []
-        response = _table().scan()
-        items.extend(response.get("Items", []))
-        while response.get("LastEvaluatedKey"):
-            response = _table().scan(ExclusiveStartKey=response["LastEvaluatedKey"])
-            items.extend(response.get("Items", []))
-    except Exception as exc:
-        raise DeviceStoreError("Failed to list device settings") from exc
-    for item in items:
-        item["actions"] = list(DEVICE_KINDS.get(item.get("kind", ""), {}))
-    return sorted(items, key=lambda item: str(item.get("device_name", "")))
-
-
-def _get_configured_device(device_name: str) -> dict[str, Any] | None:
-    try:
-        return _table().get_item(Key={"device_name": device_name}).get("Item")
-    except Exception as exc:
-        raise DeviceStoreError("Failed to read device setting") from exc
-
-
-def _put_configured_device(item: dict[str, Any]) -> None:
-    try:
-        _table().put_item(Item=item)
-    except Exception as exc:
-        raise DeviceStoreError("Failed to save device setting") from exc
-
-
-def _delete_configured_device(device_name: str) -> None:
-    try:
-        _table().delete_item(Key={"device_name": device_name})
-    except Exception as exc:
-        raise DeviceStoreError("Failed to delete device setting") from exc
-
-
-def _valid_device_name(value: str) -> bool:
-    return value == value.strip() and 1 <= len(value) <= 64 and "/" not in value and all(
-        ord(character) >= 32 for character in value
-    )
-
-
 def _request_json(event: dict[str, Any]) -> dict[str, Any]:
     body = event.get("body")
     if not isinstance(body, str) or not body:
@@ -415,63 +384,35 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
         return _response(403, {"message": "このユーザーには操作権限がありません"})
     try:
         client = SwitchBotClient(_config())
-        if route == "GET /catalog/devices":
-            return _response(200, {"devices": client.devices(), "user": email})
-
+        devices = client.devices()
         if route == "GET /devices":
-            return _response(200, {"devices": _list_configured_devices(), "user": email})
+            return _response(200, {"devices": devices, "user": email})
 
-        device_name = str((event.get("pathParameters") or {}).get("device", ""))
-        if route == "PUT /devices/{device}":
-            if not _valid_device_name(device_name):
-                return _response(400, {"message": "名称は1～64文字（スラッシュ不可）で指定してください"})
-            try:
-                request = _request_json(event)
-            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
-                return _response(400, {"message": "JSONリクエストが不正です"})
-            device_id = str(request.get("deviceId", "")).strip()
-            kind = str(request.get("kind", "")).strip()
-            if kind not in DEVICE_KINDS or not device_id:
-                return _response(400, {"message": "deviceIdとkind（lockまたはpower）が必要です"})
-            catalog = {item["deviceId"]: item for item in client.devices()}
-            if device_id not in catalog:
-                return _response(400, {"message": "SwitchBotアカウントに存在しないデバイスIDです"})
-            item = {
-                "device_name": device_name,
-                "device_id": device_id,
-                "kind": kind,
-                "switchbot_name": catalog[device_id]["deviceName"],
-                "device_type": catalog[device_id]["deviceType"],
-                "source": catalog[device_id]["source"],
-            }
-            _put_configured_device(item)
-            return _response(200, {**item, "actions": list(DEVICE_KINDS[kind])})
-        if route == "DELETE /devices/{device}":
-            _delete_configured_device(device_name)
-            return _response(200, {"ok": True, "device": device_name})
-
-        definition = _get_configured_device(device_name or "lock")
+        device_id = str((event.get("pathParameters") or {}).get("device", ""))
+        if route in ("GET /status", "POST /lock", "POST /unlock"):
+            definition = next((item for item in devices if item["kind"] == "lock"), None)
+        else:
+            definition = next((item for item in devices if item["deviceId"] == device_id), None)
         if definition is None:
-            return _response(404, {"message": "指定されたデバイスは設定されていません"})
+            return _response(404, {"message": "指定されたSwitchBotデバイスはありません"})
 
         if route == "GET /status":
-            return _response(200, {**client.status(definition["device_id"]), "user": email})
+            return _response(200, {**client.status(definition["deviceId"]), "user": email})
         if route == "POST /lock":
-            if definition["kind"] != "lock":
-                return _response(400, {"message": "lockは施錠デバイスとして設定されていません"})
-            client.command(definition["device_id"], "lock")
+            client.command(definition["deviceId"], "lock")
             logger.info("Lock action completed for %s", email)
             return _response(200, {"ok": True, "action": "lock"})
         if route == "POST /unlock":
-            if definition["kind"] != "lock":
-                return _response(400, {"message": "lockは施錠デバイスとして設定されていません"})
-            client.command(definition["device_id"], "unlock")
+            client.command(definition["deviceId"], "unlock")
             logger.info("Unlock action completed for %s", email)
             return _response(200, {"ok": True, "action": "unlock"})
         if route == "GET /devices/{device}/status":
+            if not definition["supportsStatus"]:
+                return _response(400, {"message": "赤外線リモコンは状態取得に対応していません"})
             return _response(200, {
-                "device": device_name,
-                **client.status(definition["device_id"]),
+                "deviceId": device_id,
+                "deviceName": definition["deviceName"],
+                **client.status(definition["deviceId"]),
                 "user": email,
             })
         if route == "POST /devices/{device}/actions":
@@ -479,18 +420,19 @@ def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
                 action = str(_request_json(event).get("action", ""))
             except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
                 return _response(400, {"message": "JSONリクエストが不正です"})
-            command = DEVICE_KINDS.get(definition.get("kind", ""), {}).get(action)
+            command = DEVICE_KINDS[definition["kind"]].get(action)
             if command is None:
                 return _response(400, {"message": "このデバイスでは利用できない操作です"})
-            client.command(definition["device_id"], command)
-            logger.info("%s action %s completed for %s", device_name, action, email)
+            client.command(definition["deviceId"], command)
+            logger.info("%s action %s completed for %s", device_id, action, email)
             return _response(200, {
                 "ok": True,
-                "device": device_name,
+                "deviceId": device_id,
+                "deviceName": definition["deviceName"],
                 "action": action,
             })
         return _response(404, {"message": "Not found"})
-    except (SwitchBotError, DeviceStoreError, KeyError, ValueError, json.JSONDecodeError):
+    except (SwitchBotError, KeyError, ValueError, json.JSONDecodeError):
         # 上流APIの応答やシークレット内容は利用者へ返さず、CloudWatch Logsだけに記録する。
         logger.exception("SwitchBot operation failed for %s", email)
         return _response(502, {"message": "SwitchBotの操作に失敗しました"})

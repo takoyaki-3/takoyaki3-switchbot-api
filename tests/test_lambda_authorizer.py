@@ -80,11 +80,12 @@ class FirebaseJwtTests(unittest.TestCase):
         "SWITCHBOT_TOKEN": "token",
         "SWITCHBOT_SECRET": "secret",
     })
-    @patch("lambda_function._get_configured_device", return_value={
-        "device_name": "lock", "device_id": "lock-1", "kind": "lock",
-    })
     @patch("lambda_function.SwitchBotClient")
-    def test_rest_api_unlock_route_uses_authorizer_context(self, client_class, _device):
+    def test_rest_api_unlock_route_uses_authorizer_context(self, client_class):
+        client_class.return_value.devices.return_value = [{
+            "deviceId": "lock-1", "deviceName": "玄関", "kind": "lock",
+            "actions": ["lock", "unlock"], "supportsStatus": True,
+        }]
         response = lambda_function.handler({
             "httpMethod": "POST",
             "resource": "/unlock",
@@ -103,15 +104,16 @@ class FirebaseJwtTests(unittest.TestCase):
         "SWITCHBOT_TOKEN": "token",
         "SWITCHBOT_SECRET": "secret",
     })
-    @patch("lambda_function._get_configured_device", return_value={
-        "device_name": "light", "device_id": "light-1", "kind": "power",
-    })
     @patch("lambda_function.SwitchBotClient")
-    def test_light_on_maps_to_switchbot_turn_on(self, client_class, _device):
+    def test_light_on_maps_to_switchbot_turn_on(self, client_class):
+        client_class.return_value.devices.return_value = [{
+            "deviceId": "light-1", "deviceName": "ライト", "kind": "power",
+            "actions": ["on", "off"], "supportsStatus": False,
+        }]
         response = lambda_function.handler({
             "httpMethod": "POST",
             "resource": "/devices/{device}/actions",
-            "pathParameters": {"device": "light"},
+            "pathParameters": {"device": "light-1"},
             "body": json.dumps({"action": "on"}),
             "requestContext": {"authorizer": {
                 "sub": "firebase-user-1",
@@ -128,15 +130,16 @@ class FirebaseJwtTests(unittest.TestCase):
         "SWITCHBOT_TOKEN": "token",
         "SWITCHBOT_SECRET": "secret",
     })
-    @patch("lambda_function._get_configured_device", return_value={
-        "device_name": "fan", "device_id": "fan-1", "kind": "power",
-    })
     @patch("lambda_function.SwitchBotClient")
-    def test_lock_action_is_not_available_for_fan(self, client_class, _device):
+    def test_lock_action_is_not_available_for_fan(self, client_class):
+        client_class.return_value.devices.return_value = [{
+            "deviceId": "fan-1", "deviceName": "扇風機", "kind": "power",
+            "actions": ["on", "off"], "supportsStatus": False,
+        }]
         response = lambda_function.handler({
             "httpMethod": "POST",
             "resource": "/devices/{device}/actions",
-            "pathParameters": {"device": "fan"},
+            "pathParameters": {"device": "fan-1"},
             "body": json.dumps({"action": "unlock"}),
             "requestContext": {"authorizer": {
                 "sub": "firebase-user-1",
@@ -148,31 +151,40 @@ class FirebaseJwtTests(unittest.TestCase):
         self.assertEqual(response["statusCode"], 400)
         client_class.return_value.command.assert_not_called()
 
-    @patch.dict(os.environ, {
-        "ALLOWED_EMAILS": "owner@example.com",
-        "SWITCHBOT_TOKEN": "token",
-        "SWITCHBOT_SECRET": "secret",
-    })
-    @patch("lambda_function._table")
-    @patch("lambda_function.SwitchBotClient")
-    def test_device_can_be_registered_from_switchbot_catalog(self, client_class, table):
-        client_class.return_value.devices.return_value = [{
-            "deviceId": "device-1", "deviceName": "リビング", "deviceType": "Bot",
-            "source": "physical",
-        }]
-        response = lambda_function.handler({
-            "httpMethod": "PUT",
-            "resource": "/devices/{device}",
-            "pathParameters": {"device": "照明"},
-            "body": json.dumps({"deviceId": "device-1", "kind": "power"}),
-            "requestContext": {"authorizer": {
-                "sub": "firebase-user-1", "email": "owner@example.com",
-                "email_verified": "true",
-            }},
-        }, None)
+    def test_device_capabilities_are_inferred_from_switchbot_type(self):
+        self.assertEqual(
+            lambda_function._device_capabilities("Smart Lock", "physical"),
+            ("lock", ["lock", "unlock"]),
+        )
+        self.assertEqual(
+            lambda_function._device_capabilities("Light", "infrared"),
+            ("power", ["on", "off"]),
+        )
+        self.assertEqual(
+            lambda_function._device_capabilities("Keypad", "physical"),
+            ("readonly", []),
+        )
 
-        self.assertEqual(response["statusCode"], 200)
-        table.return_value.put_item.assert_called_once()
+    def test_switchbot_names_and_types_are_returned_without_manual_configuration(self):
+        client = lambda_function.SwitchBotClient(
+            lambda_function.Config(token="token", secret="secret")
+        )
+        with patch.object(client, "_request", return_value={"body": {
+            "deviceList": [{
+                "deviceId": "lock-1", "deviceName": "玄関ロック",
+                "deviceType": "Smart Lock",
+            }],
+            "infraredRemoteList": [{
+                "deviceId": "fan-1", "deviceName": "扇風機", "deviceType": "Fan",
+            }],
+        }}):
+            devices = client.devices()
+
+        self.assertEqual(devices[0]["deviceName"], "玄関ロック")
+        self.assertEqual(devices[0]["actions"], ["lock", "unlock"])
+        self.assertEqual(devices[1]["deviceName"], "扇風機")
+        self.assertEqual(devices[1]["actions"], ["on", "off"])
+        self.assertFalse(devices[1]["supportsStatus"])
 
 
 if __name__ == "__main__":
