@@ -1,0 +1,230 @@
+openapi: 3.0.3
+info:
+  title: Takoyaki3 SwitchBot Lock API
+  version: 1.0.0
+  description: |-
+    Firebase Authenticationで認証した許可ユーザーが、SwitchBotスマートロックの
+    状態取得、施錠、解錠を行うためのAPIです。
+servers:
+  - url: https://irk08qz577.execute-api.ap-northeast-1.amazonaws.com/prod
+    description: Production
+
+tags:
+  - name: Public
+    description: 認証前に利用できる画面とリダイレクト
+  - name: Lock
+    description: Firebase JWTを必要とするロック操作
+
+paths:
+  /:
+    get:
+      tags:
+        - Public
+      operationId: redirectToLogin
+      summary: Firebaseログイン画面へリダイレクト
+      security: []
+      responses:
+        "302":
+          description: Firebaseログイン画面へのリダイレクト
+          headers:
+            Location:
+              description: ログイン画面のURL
+              schema:
+                type: string
+                format: uri
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AccessControlAllowOrigin"
+
+  /control:
+    get:
+      tags:
+        - Public
+      operationId: getControlPage
+      summary: ブラウザ操作画面を取得
+      security: []
+      responses:
+        "200":
+          description: HTML操作画面
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AccessControlAllowOrigin"
+          content:
+            text/html:
+              schema:
+                type: string
+
+  /status:
+    get:
+      tags:
+        - Lock
+      operationId: getLockStatus
+      summary: スマートロックの状態を取得
+      security:
+        - firebaseJwt: []
+      responses:
+        "200":
+          description: 状態取得成功
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AccessControlAllowOrigin"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LockStatus"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/SwitchBotFailure"
+
+  /lock:
+    post:
+      tags:
+        - Lock
+      operationId: lockDoor
+      summary: スマートロックを施錠
+      security:
+        - firebaseJwt: []
+      responses:
+        "200":
+          description: 施錠コマンド送信成功
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AccessControlAllowOrigin"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+              example:
+                ok: true
+                action: lock
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/SwitchBotFailure"
+
+  /unlock:
+    post:
+      tags:
+        - Lock
+      operationId: unlockDoor
+      summary: スマートロックを解錠
+      description: 実行前にクライアント側で利用者へ確認することを推奨します。
+      security:
+        - firebaseJwt: []
+      responses:
+        "200":
+          description: 解錠コマンド送信成功
+          headers:
+            Access-Control-Allow-Origin:
+              $ref: "#/components/headers/AccessControlAllowOrigin"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ActionResult"
+              example:
+                ok: true
+                action: unlock
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "502":
+          $ref: "#/components/responses/SwitchBotFailure"
+
+components:
+  securitySchemes:
+    firebaseJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |-
+        Firebaseプロジェクト`takoyaki3-auth`が発行したIDトークン。
+        Lambda AuthorizerがFirebase公開鍵で署名とclaimsを検証します。
+
+  headers:
+    AccessControlAllowOrigin:
+      description: 許可されたCORS Origin
+      schema:
+        type: string
+        example: "*"
+
+  schemas:
+    LockStatus:
+      type: object
+      required:
+        - user
+      properties:
+        lockState:
+          type: string
+          description: SwitchBotが返したロック状態
+          example: locked
+        user:
+          type: string
+          format: email
+          description: 操作を要求した認証済みユーザー
+      additionalProperties: true
+
+    ActionResult:
+      type: object
+      required:
+        - ok
+        - action
+      properties:
+        ok:
+          type: boolean
+          enum:
+            - true
+        action:
+          type: string
+          enum:
+            - lock
+            - unlock
+      additionalProperties: false
+
+    Error:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          type: string
+      additionalProperties: false
+
+  responses:
+    Unauthorized:
+      description: JWTがない、またはJWTの検証に失敗
+      headers:
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/AccessControlAllowOrigin"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+
+    Forbidden:
+      description: 認証済みだが許可メールアドレスに含まれていない
+      headers:
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/AccessControlAllowOrigin"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: このユーザーには操作権限がありません
+
+    SwitchBotFailure:
+      description: SwitchBot APIの呼び出しに失敗
+      headers:
+        Access-Control-Allow-Origin:
+          $ref: "#/components/headers/AccessControlAllowOrigin"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            message: SwitchBotの操作に失敗しました
