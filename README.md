@@ -38,7 +38,9 @@ SwitchBotの任意コマンドを中継する仕様にはしていません。Ke
 
 UIは以下をブラウザストレージへ保存しないステートレス構成です。
 
-- JWT: JavaScriptメモリ内だけに保持し、再読み込み・タブ終了時に破棄
+- JWTがない場合: `http://takoyaki3-auth.web.app/?r=https://home-switchbot.app.takoyaki3.com/`へ自動リダイレクト
+- JWT付きで戻った場合: `?jwt=...`をメモリへ取り込み、即座にブラウザのURLから削除して自動接続
+- JWTの保持: JavaScriptメモリ内だけ。再読み込み・タブ終了時に破棄
 - デバイス一覧: 毎回SwitchBot APIから取得
 - API URL: CloudFrontの`devices*`ビヘイビアで同一オリジンからAPI Gatewayへ転送
 

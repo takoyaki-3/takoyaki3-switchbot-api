@@ -11,24 +11,29 @@
     body{margin:0;min-height:100vh;padding:28px 18px;background:radial-gradient(circle at 10% 0,#6e342755,transparent 35rem),#101110}
     main{width:min(960px,100%);margin:auto}header,.row{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
     h1{margin:.2rem 0;font-size:clamp(1.6rem,5vw,2.5rem)}h2{font-size:1.1rem}p{color:#bbb4aa}.panel,.card{background:#1b1c1a;border:1px solid #343630;border-radius:18px;padding:18px;box-shadow:0 12px 35px #0003}
-    .auth{margin:22px 0}.auth input{flex:1;min-width:240px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0 28px}
-    input,button{font:inherit;border-radius:10px;padding:.72rem .85rem}input{border:1px solid #4a4c45;background:#111;color:inherit}button{border:0;background:#e97443;color:#17100c;font-weight:700;cursor:pointer}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin:14px 0 28px}
+    button{font:inherit;border:0;border-radius:10px;padding:.72rem .85rem;background:#e97443;color:#17100c;font-weight:700;cursor:pointer}button.secondary{background:#343731;color:#eee}button:disabled{opacity:.45;cursor:wait}
     .actions{display:flex;gap:8px;flex-wrap:wrap}.status{min-height:1.4em;color:#d8cfc4}.muted{font-size:.84rem;color:#999187}.empty{padding:26px;text-align:center;color:#999}.notice{min-height:1.5rem;color:#f0b090}
   </style>
 </head>
 <body><main>
-  <header><div><p class="muted">STATELESS DEVICE CONTROL</p><h1>Takoyaki3 Home</h1></div><button id="reload" class="secondary" disabled>再読み込み</button></header>
-  <section class="panel auth"><div class="row"><input id="jwt" type="password" autocomplete="off" placeholder="Firebase JWTを貼り付け"><button id="connect">接続</button></div><p class="muted">JWTはブラウザストレージに保存されず、このページを閉じると破棄されます。</p><div id="notice" class="notice"></div></section>
-  <section><div class="row"><h2>SwitchBotデバイス</h2><p class="muted">名称と操作種別はSwitchBotから自動取得します。</p></div><div id="devices" class="grid"><div class="empty panel">JWTを入力して接続してください</div></div></section>
+  <header><div><p class="muted">STATELESS DEVICE CONTROL</p><h1>Takoyaki3 Home</h1></div><button id="reload" class="secondary">再読み込み</button></header>
+  <div id="notice" class="notice"></div>
+  <section><div class="row"><h2>SwitchBotデバイス</h2><p class="muted">名称と操作種別はSwitchBotから自動取得します。</p></div><div id="devices" class="grid"><div class="empty panel">認証を確認しています…</div></div></section>
 </main><script>
 // CloudFrontがdevicesパスをAPI Gatewayへ転送するため、環境固有URLは不要。
 const API='';
-let jwt='';
+const LOGIN_URL='http://takoyaki3-auth.web.app/?r=https://home-switchbot.app.takoyaki3.com/';
+const params=new URLSearchParams(location.search);
+let jwt=(params.get('jwt')||'').trim();
+if(params.has('jwt'))history.replaceState(null,'',location.pathname+location.hash);
 const $=selector=>document.querySelector(selector);
 const notice=message=>$('#notice').textContent=message;
+function login(){location.replace(LOGIN_URL)}
 async function api(path,options={}){
   const response=await fetch(API+path,{...options,headers:{Authorization:'Bearer '+jwt,'Content-Type':'application/json',...(options.headers||{})}});
   let body={};try{body=await response.json()}catch{}
+  if(response.status===401){jwt='';login();throw new Error('認証が必要です')}
   if(!response.ok)throw new Error(body.message||`API error (${response.status})`);return body;
 }
 const ACTION_LABELS={lock:'施錠',unlock:'解錠',on:'ON',off:'OFF'};
@@ -49,6 +54,6 @@ function render(devices){
   }
 }
 async function loadDevices(){try{notice('読み込み中…');const data=await api('/devices');render(data.devices);notice('')}catch(e){notice(e.message)}}
-$('#connect').onclick=async()=>{jwt=$('#jwt').value.trim();if(!jwt)return notice('JWTを入力してください');$('#reload').disabled=false;await loadDevices()};
 $('#reload').onclick=loadDevices;
+if(jwt)loadDevices();else login();
 </script></body></html>
