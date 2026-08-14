@@ -57,6 +57,7 @@ POWER_DEVICE_KEYWORDS = (
     "air conditioner", "tv", "speaker", "dvd", "set top box", "streamer",
     "projector", "water heater", "relay switch", "candle warmer",
 )
+NO_STATUS_DEVICE_TYPES = {"hub", "hub plus", "hub mini"}
 
 
 def _device_capabilities(device_type: str, source: str) -> tuple[str, list[str]]:
@@ -69,6 +70,16 @@ def _device_capabilities(device_type: str, source: str) -> tuple[str, list[str]]
     if any(keyword in normalized for keyword in POWER_DEVICE_KEYWORDS):
         return "power", list(DEVICE_KINDS["power"])
     return "readonly", []
+
+
+def _supports_status(device_type: str, source: str) -> bool:
+    """公式のStatus対応表に基づき、状態取得ボタンを表示できるか判定する。"""
+    if source != "physical":
+        return False
+    normalized = device_type.strip().lower()
+    if normalized in NO_STATUS_DEVICE_TYPES or "camera" in normalized or "cam" in normalized:
+        return False
+    return True
 
 
 class SwitchBotClient:
@@ -148,7 +159,7 @@ class SwitchBotClient:
                     "source": source,
                     "kind": kind,
                     "actions": actions,
-                    "supportsStatus": source == "physical",
+                    "supportsStatus": _supports_status(device_type, source),
                 })
         return devices
 

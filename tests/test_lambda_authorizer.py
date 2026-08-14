@@ -164,6 +164,10 @@ class FirebaseJwtTests(unittest.TestCase):
             lambda_function._device_capabilities("Keypad", "physical"),
             ("readonly", []),
         )
+        self.assertTrue(lambda_function._supports_status("Hub 2", "physical"))
+        self.assertTrue(lambda_function._supports_status("Meter Plus (JP)", "physical"))
+        self.assertFalse(lambda_function._supports_status("Hub Mini", "physical"))
+        self.assertFalse(lambda_function._supports_status("Fan", "infrared"))
 
     def test_switchbot_names_and_types_are_returned_without_manual_configuration(self):
         client = lambda_function.SwitchBotClient(

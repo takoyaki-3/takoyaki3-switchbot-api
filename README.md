@@ -21,6 +21,8 @@ Firebase Authenticationで認証した許可ユーザーが、SwitchBotデバイ
 
 SwitchBotの任意コマンドを中継する仕様にはしていません。Keypadやセンサーなどは誤操作を避けるため`readonly`になります。
 
+状態取得対応デバイスでは、`GET /devices/{deviceId}/status`の応答から温度、湿度、CO₂、バッテリー、電源、鍵状態などをUIに表示します。SwitchBot公式仕様上、Hub 2／Hub 3やMeter系は状態取得に対応しますが、従来のHub Mini／Hub Plus／Hubは状態取得非対応としてボタンを表示しません。
+
 ## API
 
 詳細は[openapi.yaml](openapi.yaml)を参照してください。
@@ -50,7 +52,8 @@ UIは以下をブラウザストレージへ保存しないステートレス構
 - 一括操作設定: HTMLには保存せず、APIを通じてDynamoDBから取得・更新
 - API URL: CloudFrontの`devices*`／`bulk-actions*`ビヘイビアで同一オリジンからAPI Gatewayへ転送
 - スマートフォン表示: 1カラムのデバイスカードと大きなタップ領域に切り替え、画面端のセーフエリアにも対応
-- 表示順: ロックを常に一覧の先頭へ表示
+- 表示順: ロック、電源操作可能デバイス、状態参照のみデバイスの順に表示
+- 状態表示: 温度は`℃`、湿度・バッテリーは`%`、CO₂は`ppm`付きで表示
 - 一括操作対象: 各デバイスカードからAPIへ設定し、ロックは解錠、電源デバイスはONとして保存
 - 一括操作: 画面上部のボタンは`POST /bulk-actions/home-on`を1回だけ呼び、API側がDynamoDBの設定を読み取って実行
 

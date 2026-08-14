@@ -42,6 +42,20 @@ async function api(path,options={}){
 }
 const ACTION_LABELS={lock:'施錠',unlock:'解錠',on:'ON',off:'OFF'};
 const KIND_LABELS={lock:'鍵',power:'電源',readonly:'参照のみ'};
+const STATUS_FIELDS=[
+  ['temperature','温度','℃'],['humidity','湿度','%'],['CO2','CO₂','ppm'],['co2','CO₂','ppm'],
+  ['battery','バッテリー','%'],['lockState','鍵'],['power','電源'],['openState','開閉'],
+  ['lightLevel','照度'],['brightness','明るさ'],['speed','速度'],['moving','動作中']
+];
+function formatStatus(value){
+  const parts=[];
+  for(const [key,label,unit=''] of STATUS_FIELDS){
+    if(!(key in value))continue;
+    const raw=typeof value[key]==='boolean'?(value[key]?'はい':'いいえ'):value[key];
+    parts.push(`${label} ${raw}${unit}`);
+  }
+  return parts.join(' / ')||JSON.stringify(value);
+}
 const bulkTargets=()=>currentDevices.filter(device=>device.bulkEnabled);
 function updateBulkAction(){
   const targets=bulkTargets(),locks=targets.filter(device=>device.kind==='lock').length,power=targets.length-locks;
@@ -51,7 +65,8 @@ function updateBulkAction(){
 function render(devices){
   const root=$('#devices');root.replaceChildren();
   if(!devices.length){root.innerHTML='<div class="empty panel">SwitchBotデバイスはありません</div>';return}
-  const sorted=[...devices].sort((a,b)=>(a.kind==='lock'?0:1)-(b.kind==='lock'?0:1)||(a.deviceName||'').localeCompare(b.deviceName||'','ja'));
+  const rank={lock:0,power:1,readonly:2};
+  const sorted=[...devices].sort((a,b)=>(rank[a.kind]??3)-(rank[b.kind]??3)||(a.deviceName||'').localeCompare(b.deviceName||'','ja'));
   for(const device of sorted){
     const card=document.createElement('article');card.className='card';
     const title=document.createElement('h2');title.textContent=device.deviceName||'(名称なし)';
@@ -59,7 +74,7 @@ function render(devices){
     const status=document.createElement('div');status.className='status';status.textContent='状態未取得';
     const buttons=document.createElement('div');buttons.className='actions';
     for(const action of device.actions){const label=ACTION_LABELS[action]||action;const button=document.createElement('button');button.textContent=label;button.onclick=async()=>{if(action==='unlock'&&!confirm(`${device.deviceName}を解錠しますか？`))return;button.disabled=true;try{await api(`/devices/${encodeURIComponent(device.deviceId)}/actions`,{method:'POST',body:JSON.stringify({action})});status.textContent=`${label}を送信しました`}catch(e){status.textContent=e.message}finally{button.disabled=false}};buttons.append(button)}
-    if(device.supportsStatus){const refresh=document.createElement('button');refresh.className='secondary';refresh.textContent='状態';refresh.onclick=async()=>{refresh.disabled=true;try{const value=await api(`/devices/${encodeURIComponent(device.deviceId)}/status`);status.textContent=value.lockState||value.power||value.deviceMode||JSON.stringify(value)}catch(e){status.textContent=e.message}finally{refresh.disabled=false}};buttons.append(refresh)}
+    if(device.supportsStatus){const refresh=document.createElement('button');refresh.className='secondary';refresh.textContent='状態を取得';refresh.onclick=async()=>{refresh.disabled=true;try{const value=await api(`/devices/${encodeURIComponent(device.deviceId)}/status`);status.textContent=formatStatus(value)}catch(e){status.textContent=e.message}finally{refresh.disabled=false}};buttons.append(refresh)}
     if(!device.actions.length&&!device.supportsStatus)status.textContent='このAPIで利用できる操作はありません';
     card.append(title,meta,status,buttons);
     if(device.kind==='lock'||device.kind==='power'){

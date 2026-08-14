@@ -135,7 +135,7 @@ components:
         actions:
           type: array
           items: {type: string, enum: [lock, unlock, on, off]}
-        supportsStatus: {type: boolean}
+        supportsStatus: {type: boolean, description: SwitchBot公式の製品別Status対応に基づく状態取得可否}
         bulkEnabled: {type: boolean, description: DynamoDBに保存された一括操作対象フラグ}
     BulkActionResult:
       type: object
