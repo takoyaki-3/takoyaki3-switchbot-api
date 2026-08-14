@@ -3,13 +3,104 @@
 from __future__ import annotations
 
 import html
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
+import time
+import uuid
+from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote
+from urllib.request import Request, urlopen
 
-from switchbot_lock import Config, SwitchBotClient, SwitchBotError
+
+API_BASE_URL = "https://api.switch-bot.com/v1.1"
+SUCCESS_CODE = 100
+
+
+class SwitchBotError(RuntimeError):
+    """SwitchBot API の呼び出しに失敗した場合の例外。"""
+
+
+@dataclass(frozen=True)
+class Config:
+    token: str
+    secret: str
+    device_id: str
+
+
+class SwitchBotClient:
+    """SwitchBot OpenAPI v1.1 のスマートロッククライアント。"""
+
+    def __init__(self, config: Config, *, timeout: float = 10.0) -> None:
+        self.config = config
+        self.timeout = timeout
+
+    def _headers(self) -> dict[str, str]:
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid.uuid4())
+        message = f"{self.config.token}{timestamp}{nonce}".encode("utf-8")
+        signature = base64.b64encode(
+            hmac.new(
+                self.config.secret.encode("utf-8"),
+                message,
+                hashlib.sha256,
+            ).digest()
+        ).decode("ascii")
+        return {
+            "Authorization": self.config.token,
+            "Content-Type": "application/json; charset=utf-8",
+            "t": timestamp,
+            "sign": signature,
+            "nonce": nonce,
+        }
+
+    def _request(
+        self, method: str, path: str, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        data = None if payload is None else json.dumps(payload).encode("utf-8")
+        request = Request(
+            f"{API_BASE_URL}{path}",
+            data=data,
+            headers=self._headers(),
+            method=method,
+        )
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                result = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise SwitchBotError(f"HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise SwitchBotError(f"SwitchBot API に接続できません: {exc.reason}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SwitchBotError("SwitchBot API から不正な応答を受信しました") from exc
+
+        if result.get("statusCode") != SUCCESS_CODE:
+            raise SwitchBotError(
+                f"APIエラー {result.get('statusCode', 'unknown')}: "
+                f"{result.get('message', '詳細なし')}"
+            )
+        return result
+
+    def status(self) -> dict[str, Any]:
+        result = self._request("GET", f"/devices/{self.config.device_id}/status")
+        return result.get("body", {})
+
+    def set_locked(self, locked: bool) -> None:
+        self._request(
+            "POST",
+            f"/devices/{self.config.device_id}/commands",
+            {
+                "command": "lock" if locked else "unlock",
+                "parameter": "default",
+                "commandType": "command",
+            },
+        )
 
 
 _secret_cache: Config | None = None

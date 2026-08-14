@@ -38,15 +38,12 @@ export class Takoyaki3LockStack extends cdk.Stack {
       allowedPattern: '^https://[^/]+$',
     });
 
-    // Lambdaへは実行に必要なPythonファイルだけをパッケージする。
+    // Lambdaコード専用ディレクトリをそのままデプロイパッケージにする。
     const lockFunction = new lambda.Function(this, 'LockFunction', {
       runtime: lambda.Runtime.PYTHON_3_12,
       architecture: lambda.Architecture.ARM_64,
       handler: 'lambda_function.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..'), {
-        ignoreMode: cdk.IgnoreMode.GIT,
-        exclude: ['*', '!lambda_function.py', '!switchbot_lock.py'],
-      }),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda')),
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
       environment: {
