@@ -24,7 +24,6 @@ jobs:
       AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
       SWITCHBOT_TOKEN: ${{ secrets.SWITCHBOT_TOKEN }}
       SWITCHBOT_SECRET: ${{ secrets.SWITCHBOT_SECRET }}
-      SWITCHBOT_DEVICE_ID: ${{ secrets.SWITCHBOT_DEVICE_ID }}
       ALLOWED_EMAILS: ${{ secrets.ALLOWED_EMAILS }}
 
     steps:
@@ -45,7 +44,7 @@ jobs:
       - name: Validate deployment settings
         shell: bash
         run: |
-          for name in AWS_REGION AWS_ROLE_ARN SWITCHBOT_TOKEN SWITCHBOT_SECRET SWITCHBOT_DEVICE_ID ALLOWED_EMAILS; do
+          for name in AWS_REGION AWS_ROLE_ARN SWITCHBOT_TOKEN SWITCHBOT_SECRET ALLOWED_EMAILS; do
             if [[ -z "${!name}" ]]; then
               echo "::error::GitHub setting ${name} is not configured."
               exit 1
@@ -91,5 +90,4 @@ jobs:
             --require-approval never \
             --parameters "SwitchBotToken=${SWITCHBOT_TOKEN}" \
             --parameters "SwitchBotSecret=${SWITCHBOT_SECRET}" \
-            --parameters "SwitchBotDeviceId=${SWITCHBOT_DEVICE_ID}" \
             --parameters "AllowedEmails=${ALLOWED_EMAILS}"

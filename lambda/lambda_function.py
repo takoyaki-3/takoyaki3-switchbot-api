@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import html
 import base64
 import binascii
 import hashlib
@@ -15,7 +14,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -37,11 +35,21 @@ class JwtVerificationError(RuntimeError):
     """Firebase JWTの検証に失敗した場合の例外。"""
 
 
+class DeviceStoreError(RuntimeError):
+    """DynamoDBのデバイス設定操作に失敗した場合の例外。"""
+
+
 @dataclass(frozen=True)
 class Config:
     token: str
     secret: str
-    device_id: str
+
+
+DEVICE_KINDS = {
+    "lock": {"lock": "lock", "unlock": "unlock"},
+    "power": {"on": "turnOn", "off": "turnOff"},
+}
+_device_table: Any | None = None
 
 
 class SwitchBotClient:
@@ -98,16 +106,34 @@ class SwitchBotClient:
             )
         return result
 
-    def status(self) -> dict[str, Any]:
-        result = self._request("GET", f"/devices/{self.config.device_id}/status")
+    def status(self, device_id: str) -> dict[str, Any]:
+        result = self._request("GET", f"/devices/{device_id}/status")
         return result.get("body", {})
 
-    def set_locked(self, locked: bool) -> None:
+    def devices(self) -> list[dict[str, str]]:
+        body = self._request("GET", "/devices").get("body", {})
+        devices: list[dict[str, str]] = []
+        for source, key in (
+            ("physical", "deviceList"),
+            ("infrared", "infraredRemoteList"),
+        ):
+            for item in body.get(key, []):
+                if not isinstance(item, dict) or not item.get("deviceId"):
+                    continue
+                devices.append({
+                    "deviceId": str(item["deviceId"]),
+                    "deviceName": str(item.get("deviceName", "")),
+                    "deviceType": str(item.get("deviceType", "")),
+                    "source": source,
+                })
+        return devices
+
+    def command(self, device_id: str, command: str) -> None:
         self._request(
             "POST",
-            f"/devices/{self.config.device_id}/commands",
+            f"/devices/{device_id}/commands",
             {
-                "command": "lock" if locked else "unlock",
+                "command": command,
                 "parameter": "default",
                 "commandType": "command",
             },
@@ -299,7 +325,6 @@ def _config() -> Config:
     return Config(
         token=os.environ["SWITCHBOT_TOKEN"],
         secret=os.environ["SWITCHBOT_SECRET"],
-        device_id=os.environ["SWITCHBOT_DEVICE_ID"],
     )
 
 
@@ -319,88 +344,153 @@ def _authorized(event: dict[str, Any]) -> tuple[bool, str]:
     return bool(subject and email and verified and email in allowed), email
 
 
-def _login_redirect(event: dict[str, Any]) -> dict[str, Any]:
-    # API GatewayのHostではなく、利用者から見えるリバースプロキシのURLへ戻す。
-    callback = f"{os.environ['PUBLIC_BASE_URL'].rstrip('/')}/control"
-    login_url = os.environ["AUTH_LOGIN_URL"].rstrip("/")
-    return {"statusCode": 302, "headers": {
-        "location": f"{login_url}?r={quote(callback, safe='')}",
-        "cache-control": "no-store",
-        "access-control-allow-origin": "*",
-    }, "body": ""}
+def _table() -> Any:
+    global _device_table
+    if _device_table is None:
+        import boto3
+        _device_table = boto3.resource("dynamodb").Table(os.environ["DEVICE_TABLE_NAME"])
+    return _device_table
 
 
-def _control_page() -> dict[str, Any]:
-    """JWTをBearerヘッダーで操作APIへ送る最小限のブラウザ画面を返す。"""
-    login_url = html.escape(os.environ["AUTH_LOGIN_URL"].rstrip("/"), quote=True)
-    page = f"""<!doctype html>
-<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
-<title>Takoyaki3 Lock</title><style>
-body{{font-family:system-ui,sans-serif;max-width:32rem;margin:4rem auto;padding:0 1rem;background:#f6f7f9;color:#18202a}}
-main{{background:white;padding:2rem;border-radius:1rem;box-shadow:0 4px 24px #0001}}
-button{{font:inherit;padding:.8rem 1.3rem;margin:.4rem;border:0;border-radius:.6rem;cursor:pointer}}
-.unlock{{background:#c62828;color:white}} .lock{{background:#263238;color:white}} #message{{min-height:1.5rem}}
-</style></head><body><main><h1>玄関ロック</h1><p id="message">認証を確認しています…</p>
-<button class="lock" data-action="lock" disabled>施錠</button>
-<button class="unlock" data-action="unlock" disabled>解錠</button></main><script>
-const loginUrl = '{login_url}';
-const params = new URLSearchParams(location.search);
-if (params.has('jwt')) {{ sessionStorage.setItem('authIdToken', params.get('jwt')); history.replaceState(null, '', location.pathname); }}
-const token = sessionStorage.getItem('authIdToken');
-const apiBase = location.pathname.endsWith('/control') ? location.pathname.slice(0, -8) : '';
-const message = document.querySelector('#message');
-const buttons = [...document.querySelectorAll('button')];
-function login() {{ location.replace(loginUrl + '?r=' + encodeURIComponent(location.origin + location.pathname)); }}
-async function call(path, options={{}}) {{
-  if (!token) return login();
-  const response = await fetch(apiBase + path, {{...options, headers: {{Authorization: 'Bearer ' + token}}}});
-  if (response.status === 401 || response.status === 403) {{ sessionStorage.removeItem('authIdToken'); return login(); }}
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.message || 'APIエラー');
-  return data;
-}}
-async function refresh() {{
-  try {{ const data = await call('/status'); message.textContent = '状態: ' + (data.lockState || data.status || '不明'); buttons.forEach(b => b.disabled=false); }}
-  catch (e) {{ message.textContent = e.message; }}
-}}
-buttons.forEach(button => button.addEventListener('click', async () => {{
-  const action = button.dataset.action;
-  if (action === 'unlock' && !confirm('本当に解錠しますか？')) return;
-  buttons.forEach(b => b.disabled=true); message.textContent = '送信中…';
-  try {{ await call('/' + action, {{method:'POST'}}); message.textContent = action === 'lock' ? '施錠しました' : '解錠しました'; }}
-  catch (e) {{ message.textContent = e.message; }} finally {{ buttons.forEach(b => b.disabled=false); }}
-}}));
-refresh();
-</script></body></html>"""
-    return _response(200, page, "text/html")
+def _list_configured_devices() -> list[dict[str, Any]]:
+    try:
+        items: list[dict[str, Any]] = []
+        response = _table().scan()
+        items.extend(response.get("Items", []))
+        while response.get("LastEvaluatedKey"):
+            response = _table().scan(ExclusiveStartKey=response["LastEvaluatedKey"])
+            items.extend(response.get("Items", []))
+    except Exception as exc:
+        raise DeviceStoreError("Failed to list device settings") from exc
+    for item in items:
+        item["actions"] = list(DEVICE_KINDS.get(item.get("kind", ""), {}))
+    return sorted(items, key=lambda item: str(item.get("device_name", "")))
+
+
+def _get_configured_device(device_name: str) -> dict[str, Any] | None:
+    try:
+        return _table().get_item(Key={"device_name": device_name}).get("Item")
+    except Exception as exc:
+        raise DeviceStoreError("Failed to read device setting") from exc
+
+
+def _put_configured_device(item: dict[str, Any]) -> None:
+    try:
+        _table().put_item(Item=item)
+    except Exception as exc:
+        raise DeviceStoreError("Failed to save device setting") from exc
+
+
+def _delete_configured_device(device_name: str) -> None:
+    try:
+        _table().delete_item(Key={"device_name": device_name})
+    except Exception as exc:
+        raise DeviceStoreError("Failed to delete device setting") from exc
+
+
+def _valid_device_name(value: str) -> bool:
+    return value == value.strip() and 1 <= len(value) <= 64 and "/" not in value and all(
+        ord(character) >= 32 for character in value
+    )
+
+
+def _request_json(event: dict[str, Any]) -> dict[str, Any]:
+    body = event.get("body")
+    if not isinstance(body, str) or not body:
+        raise ValueError("JSON body is required")
+    if event.get("isBase64Encoded"):
+        body = base64.b64decode(body, validate=True).decode("utf-8")
+    value = json.loads(body)
+    if not isinstance(value, dict):
+        raise ValueError("JSON body must be an object")
+    return value
 
 
 def handler(event: dict[str, Any], _context: Any) -> dict[str, Any]:
     """API Gateway REST APIのメソッドとリソースに応じて処理する。"""
     route = f"{event.get('httpMethod', '')} {event.get('resource', event.get('path', ''))}"
-    if route == "GET /":
-        return _login_redirect(event)
-    if route == "GET /control":
-        return _control_page()
-
     # ここへ到達する操作系ルートは、JWT検証に加えてアプリ側の認可も必須とする。
     authorized, email = _authorized(event)
     if not authorized:
         return _response(403, {"message": "このユーザーには操作権限がありません"})
     try:
         client = SwitchBotClient(_config())
+        if route == "GET /catalog/devices":
+            return _response(200, {"devices": client.devices(), "user": email})
+
+        if route == "GET /devices":
+            return _response(200, {"devices": _list_configured_devices(), "user": email})
+
+        device_name = str((event.get("pathParameters") or {}).get("device", ""))
+        if route == "PUT /devices/{device}":
+            if not _valid_device_name(device_name):
+                return _response(400, {"message": "名称は1～64文字（スラッシュ不可）で指定してください"})
+            try:
+                request = _request_json(event)
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                return _response(400, {"message": "JSONリクエストが不正です"})
+            device_id = str(request.get("deviceId", "")).strip()
+            kind = str(request.get("kind", "")).strip()
+            if kind not in DEVICE_KINDS or not device_id:
+                return _response(400, {"message": "deviceIdとkind（lockまたはpower）が必要です"})
+            catalog = {item["deviceId"]: item for item in client.devices()}
+            if device_id not in catalog:
+                return _response(400, {"message": "SwitchBotアカウントに存在しないデバイスIDです"})
+            item = {
+                "device_name": device_name,
+                "device_id": device_id,
+                "kind": kind,
+                "switchbot_name": catalog[device_id]["deviceName"],
+                "device_type": catalog[device_id]["deviceType"],
+                "source": catalog[device_id]["source"],
+            }
+            _put_configured_device(item)
+            return _response(200, {**item, "actions": list(DEVICE_KINDS[kind])})
+        if route == "DELETE /devices/{device}":
+            _delete_configured_device(device_name)
+            return _response(200, {"ok": True, "device": device_name})
+
+        definition = _get_configured_device(device_name or "lock")
+        if definition is None:
+            return _response(404, {"message": "指定されたデバイスは設定されていません"})
+
         if route == "GET /status":
-            return _response(200, {**client.status(), "user": email})
+            return _response(200, {**client.status(definition["device_id"]), "user": email})
         if route == "POST /lock":
-            client.set_locked(True)
+            if definition["kind"] != "lock":
+                return _response(400, {"message": "lockは施錠デバイスとして設定されていません"})
+            client.command(definition["device_id"], "lock")
             logger.info("Lock action completed for %s", email)
             return _response(200, {"ok": True, "action": "lock"})
         if route == "POST /unlock":
-            client.set_locked(False)
+            if definition["kind"] != "lock":
+                return _response(400, {"message": "lockは施錠デバイスとして設定されていません"})
+            client.command(definition["device_id"], "unlock")
             logger.info("Unlock action completed for %s", email)
             return _response(200, {"ok": True, "action": "unlock"})
+        if route == "GET /devices/{device}/status":
+            return _response(200, {
+                "device": device_name,
+                **client.status(definition["device_id"]),
+                "user": email,
+            })
+        if route == "POST /devices/{device}/actions":
+            try:
+                action = str(_request_json(event).get("action", ""))
+            except (UnicodeDecodeError, ValueError, json.JSONDecodeError):
+                return _response(400, {"message": "JSONリクエストが不正です"})
+            command = DEVICE_KINDS.get(definition.get("kind", ""), {}).get(action)
+            if command is None:
+                return _response(400, {"message": "このデバイスでは利用できない操作です"})
+            client.command(definition["device_id"], command)
+            logger.info("%s action %s completed for %s", device_name, action, email)
+            return _response(200, {
+                "ok": True,
+                "device": device_name,
+                "action": action,
+            })
         return _response(404, {"message": "Not found"})
-    except (SwitchBotError, KeyError, ValueError, json.JSONDecodeError):
+    except (SwitchBotError, DeviceStoreError, KeyError, ValueError, json.JSONDecodeError):
         # 上流APIの応答やシークレット内容は利用者へ返さず、CloudWatch Logsだけに記録する。
         logger.exception("SwitchBot operation failed for %s", email)
         return _response(502, {"message": "SwitchBotの操作に失敗しました"})

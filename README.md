@@ -1,142 +1,98 @@
-# Takoyaki3 SwitchBot Lock API
+# Takoyaki3 SwitchBot API
 
-`takoyaki3-auth` のFirebase Authenticationで認証し、許可されたユーザーだけがSwitchBotスマートロックを操作できるAPIです。
+Firebase Authenticationで認証した許可ユーザーが、SwitchBotデバイスを登録・参照・操作するAPIと、最小構成のWeb UIです。
 
-- インフラ: AWS CDK v2 / TypeScript
-- API: Amazon API Gateway HTTP API
-- 実行環境: AWS Lambda / Python 3.12
-- 秘密情報: GitHub Actions SecretsからLambda環境変数へ設定
+- API: API Gateway REST API + Python 3.12 Lambda
+- デバイス設定: DynamoDB（任意名称とSwitchBotデバイスIDの対応）
+- Web UI: 非公開S3バケット + CloudFront Origin Access Control
+- 認証: Firebase JWTを検証するLambda Authorizer
+- デプロイ: AWS CDK / GitHub Actions OIDC
 
-## 認証フロー
+## デバイス構成
 
-1. リバースプロキシで公開したURLを開く
-2. Lambdaが `takoyaki3-auth` へリダイレクトする
-3. 認証後、`/control?jwt=<Firebase ID token>` へ戻る
-4. ブラウザがJWTをURLから除去し、Bearerトークンとして操作APIへ送る
-5. API Gateway JWT Authorizerが署名、issuer、audience、有効期限を検証する
-6. Lambdaが `sub`、`email_verified`、許可メールアドレスを確認してSwitchBot APIを呼ぶ
+デバイスIDはソースやGitHub Secretsへ固定しません。デプロイ後、許可ユーザーが次のAPIまたはWeb UIから設定します。
 
-## CDKデプロイ
+1. `GET /catalog/devices`でSwitchBotアカウントのデバイス一覧を取得
+2. `PUT /devices/{任意名称}`へ`{"deviceId":"...","kind":"lock"}`または`kind: "power"`を送信
+3. 設定はDynamoDBに保存され、`GET /devices`からすべてのクライアントが参照
 
-初回のみ依存関係をインストールし、対象アカウント・リージョンをbootstrapします。
-
-```powershell
-npm install
-npx cdk bootstrap
-```
-
-テンプレートを確認します。
-
-```powershell
-npm run build
-npx cdk synth
-```
-
-デプロイ例:
-
-```powershell
-npx cdk deploy `
-  --parameters SwitchBotToken="SwitchBot API token" `
-  --parameters SwitchBotSecret="SwitchBot API secret" `
-  --parameters SwitchBotDeviceId="SwitchBot lock device ID" `
-  --parameters AllowedEmails="owner@example.com" `
-  --parameters PublicBaseUrl="https://lock.takoyaki3.com"
-```
-
-パラメータ:
-
-- `SwitchBotToken`: SwitchBot APIトークン（必須）
-- `SwitchBotSecret`: SwitchBot API署名用シークレット（必須）
-- `SwitchBotDeviceId`: SwitchBotロックのデバイスID（必須）
-- `AllowedEmails`: 操作を許可するメールアドレス。複数の場合はカンマ区切り（必須）
-- `FirebaseProjectId`: 既定値 `takoyaki3-auth`
-- `AuthLoginUrl`: 既定値 `https://takoyaki3-auth.web.app`
-- `PublicBaseUrl`: リバースプロキシで公開するHTTPSオリジン。末尾の `/` は付けない
-
-デプロイ後、CloudFormation出力の `ApiUrl` をリバースプロキシの転送先に設定します。利用者が開くURLは `PublicUrl` です。プロキシでは全パスと `Authorization` ヘッダーをAPI Gatewayへ転送してください。
+`kind=lock`では`lock`／`unlock`、`kind=power`では`on`／`off`のみ実行できます。SwitchBotの任意コマンドを中継する仕様にはしていません。デバイスIDを含む設定情報は秘密情報ではありませんが、すべての設定APIをFirebase JWTと許可メールアドレスで保護しています。
 
 ## API
 
-| Method | Path | 認証 | 内容 |
-|---|---|---|---|
-| GET | `/` | 不要 | `takoyaki3-auth` へリダイレクト |
-| GET | `/control` | 不要 | 操作画面 |
-| GET | `/status` | Firebase JWT | 状態取得 |
-| POST | `/lock` | Firebase JWT | 施錠 |
-| POST | `/unlock` | Firebase JWT | 解錠 |
+詳細は[openapi.yaml](openapi.yaml)を参照してください。
 
-## テスト
+| Method | Path | 内容 |
+|---|---|---|
+| GET | `/catalog/devices` | SwitchBotデバイス一覧 |
+| GET | `/devices` | 設定済み論理デバイス一覧 |
+| PUT | `/devices/{device}` | 任意名称でデバイスを登録・更新 |
+| DELETE | `/devices/{device}` | デバイス設定を削除 |
+| GET | `/devices/{device}/status` | 状態取得 |
+| POST | `/devices/{device}/actions` | 操作 |
+
+互換用の`/status`、`/lock`、`/unlock`は、論理名称`lock`に設定したデバイスを操作します。他の統合UIも同じAPIを利用できます。CORSは全オリジン（`*`）を許可します。
+
+## Web UI
+
+`cloudflare-pages/index.html`はディレクトリ名を互換のため残していますが、CDKがS3へ配置しCloudFrontで配信します。CloudFormation出力`WebUrl`がCloudFrontのデフォルトURLです。独自ドメインや証明書は作成しません。
+
+UIは以下をブラウザストレージへ保存しないステートレス構成です。
+
+- JWT: JavaScriptメモリ内だけに保持し、再読み込み・タブ終了時に破棄
+- デバイス設定: 毎回APIから取得し、DynamoDBを唯一の保存先とする
+- API URL: CloudFrontの`catalog*`／`devices*`ビヘイビアで同一オリジンからAPI Gatewayへ転送
+
+## ローカル確認とデプロイ
 
 ```powershell
-python -m unittest -v
+npm install
 npm run build
+python -m unittest -v
 npx cdk synth
 ```
 
-Firebase IDトークンは最長約1時間有効で、API Gateway JWT AuthorizerはFirebase側の即時失効を照会しません。緊急時は対象ユーザーを `AllowedEmails` から削除して再デプロイしてください。
+手動デプロイ例:
 
-## GitHub Actionsによる自動デプロイ
+```powershell
+npx cdk bootstrap
+npx cdk deploy Takoyaki3LockStack `
+  --parameters SwitchBotToken="SwitchBot API token" `
+  --parameters SwitchBotSecret="SwitchBot API secret" `
+  --parameters AllowedEmails="owner@example.com,family@example.com"
+```
 
-`.github/workflows/deploy.yml` は `main` ブランチへのpush、または手動実行でCDKスタックをデプロイします。AWSの長期アクセスキーは使用せず、GitHub OIDCでIAMロールを引き受けます。
+リージョンは東京（`ap-northeast-1`）です。`AllowedEmails`を複数指定する場合は、空白を入れずカンマで区切ります。
 
-GitHubリポジトリに次の設定を登録してください。
+## GitHub Actions
 
-Repository Secrets:
+`.github/workflows/deploy.yml`は`main`へのpushまたは手動実行でCDKスタックをデプロイします。Repository Secretsは次の4つです。
 
-- `AWS_ROLE_ARN`: GitHub ActionsがOIDCで引き受けるIAMロールのARN
-- `SWITCHBOT_TOKEN`: SwitchBot APIトークン
-- `SWITCHBOT_SECRET`: SwitchBot API署名用シークレット
-- `SWITCHBOT_DEVICE_ID`: SwitchBotロックのデバイスID
-- `ALLOWED_EMAILS`: 操作を許可するメールアドレス。複数指定する場合は、空白を入れずカンマで区切ります（例: `owner@example.com,family@example.com,staff@example.com`）
+- `AWS_ROLE_ARN`: OIDCで引き受けるIAMロール（例: `arn:aws:iam::562487498525:role/GitHubActionsOpenIDConnect`）
+- `SWITCHBOT_TOKEN`
+- `SWITCHBOT_SECRET`
+- `ALLOWED_EMAILS`: 例 `owner@example.com,family@example.com,staff@example.com`
 
-これらの値はGitHub Actionsから`NoEcho`付きCloudFormationパラメータとして渡され、Lambda環境変数に設定されます。AWS Secrets ManagerやSSM Parameter Storeには保存しません。
+AWSの長期アクセスキー、Secrets Manager、SSM Parameter Storeは使用しません。SwitchBotトークンとシークレットは`NoEcho`付きCloudFormationパラメータを経由してLambda環境変数に設定します。
 
-デプロイ先リージョンは東京リージョン（`ap-northeast-1`）に固定されています。
-
-AWS IAMにOIDCプロバイダーを作成します。
-
-- Provider URL: `https://token.actions.githubusercontent.com`
-- Audience: `sts.amazonaws.com`
-
-IAMロールの信頼ポリシーは、このリポジトリの `main` ブランチだけを許可します。`AWS_ACCOUNT_ID` は実際のAWSアカウントIDへ置き換えてください。
+OIDCロールの信頼ポリシーでは、実際のGitHub OIDCトークンに合わせて次の`sub`を許可します。
 
 ```json
 {
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::AWS_ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:takoyaki-3/takoyaki3-switchbot-api:ref:refs/heads/main"
-        }
-      }
-    }
-  ]
+  "StringEquals": {
+    "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+    "token.actions.githubusercontent.com:sub": "repo:takoyaki-3@36257738/takoyaki3-switchbot-api@1333260450:ref:refs/heads/main"
+  }
 }
 ```
 
-このIAMロールには、CDK bootstrapで作成されたデプロイロールとファイル公開ロールを引き受ける権限など、CDKデプロイに必要な権限を付与してください。
-
-## デプロイ後のAPI確認
-
-AWS CLIで認証した環境から次を実行します。CloudFormationスタックの出力からAPI URLを取得した後、Firebase JWTの入力を求められます。貼り付けたJWTは画面やコマンド履歴には表示されません。
+デプロイ後の出力確認:
 
 ```powershell
-python scripts/verify_deployment.py
+aws cloudformation describe-stacks `
+  --stack-name Takoyaki3LockStack `
+  --region ap-northeast-1 `
+  --query "Stacks[0].Outputs"
 ```
 
-AWS CLIプロファイルやスタック名を指定する場合:
-
-```powershell
-python scripts/verify_deployment.py `
-  --profile my-profile `
-  --stack-name Takoyaki3LockStack
-```
-
-スクリプトは認証が必要な`GET /status`だけを呼び出し、鍵の状態は変更しません。JWTには`ALLOWED_EMAILS`で許可した検証済みメールアドレスのユーザーを指定してください。
+APIの読み取り確認は`python scripts/verify_deployment.py`を実行し、質問されたらFirebase JWTを貼り付けます。

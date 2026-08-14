@@ -1,230 +1,150 @@
 openapi: 3.0.3
 info:
-  title: Takoyaki3 SwitchBot Lock API
-  version: 1.0.0
-  description: |-
-    Firebase Authenticationで認証した許可ユーザーが、SwitchBotスマートロックの
-    状態取得、施錠、解錠を行うためのAPIです。
+  title: Takoyaki3 SwitchBot API
+  version: 2.0.0
+  description: Firebase JWTで保護された、SwitchBotデバイスの登録・状態取得・操作API。
 servers:
   - url: https://irk08qz577.execute-api.ap-northeast-1.amazonaws.com/prod
-    description: Production
-
-tags:
-  - name: Public
-    description: 認証前に利用できる画面とリダイレクト
-  - name: Lock
-    description: Firebase JWTを必要とするロック操作
-
+security:
+  - firebaseJwt: []
 paths:
-  /:
+  /catalog/devices:
     get:
-      tags:
-        - Public
-      operationId: redirectToLogin
-      summary: Firebaseログイン画面へリダイレクト
-      security: []
-      responses:
-        "302":
-          description: Firebaseログイン画面へのリダイレクト
-          headers:
-            Location:
-              description: ログイン画面のURL
-              schema:
-                type: string
-                format: uri
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AccessControlAllowOrigin"
-
-  /control:
-    get:
-      tags:
-        - Public
-      operationId: getControlPage
-      summary: ブラウザ操作画面を取得
-      security: []
+      summary: SwitchBotアカウントに登録されたデバイス一覧を取得
+      operationId: listSwitchBotDevices
       responses:
         "200":
-          description: HTML操作画面
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AccessControlAllowOrigin"
-          content:
-            text/html:
-              schema:
-                type: string
-
-  /status:
-    get:
-      tags:
-        - Lock
-      operationId: getLockStatus
-      summary: スマートロックの状態を取得
-      security:
-        - firebaseJwt: []
-      responses:
-        "200":
-          description: 状態取得成功
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AccessControlAllowOrigin"
+          description: 物理デバイスと赤外線リモコンの一覧
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/LockStatus"
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "502":
-          $ref: "#/components/responses/SwitchBotFailure"
-
-  /lock:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items: {$ref: "#/components/schemas/CatalogDevice"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /devices:
+    get:
+      summary: APIに設定済みの論理デバイス一覧を取得
+      operationId: listConfiguredDevices
+      responses:
+        "200":
+          description: 設定済みデバイス一覧
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  devices:
+                    type: array
+                    items: {$ref: "#/components/schemas/ConfiguredDevice"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /devices/{device}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceName"
+    put:
+      summary: 任意の論理名称でSwitchBotデバイスを設定または更新
+      operationId: putDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, kind]
+              additionalProperties: false
+              properties:
+                deviceId: {type: string}
+                kind: {type: string, enum: [lock, power]}
+      responses:
+        "200": {description: 保存した設定, content: {application/json: {schema: {$ref: "#/components/schemas/ConfiguredDevice"}}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+    delete:
+      summary: 論理デバイス設定を削除
+      operationId: deleteDevice
+      responses:
+        "200": {description: 削除完了}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+  /devices/{device}/status:
+    parameters:
+      - $ref: "#/components/parameters/DeviceName"
+    get:
+      summary: 設定済みデバイスの状態を取得
+      operationId: getDeviceStatus
+      responses:
+        "200": {description: SwitchBotの状態, content: {application/json: {schema: {type: object, additionalProperties: true}}}}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
+  /devices/{device}/actions:
+    parameters:
+      - $ref: "#/components/parameters/DeviceName"
     post:
-      tags:
-        - Lock
-      operationId: lockDoor
-      summary: スマートロックを施錠
-      security:
-        - firebaseJwt: []
+      summary: 設定済みデバイスを操作
+      description: kind=lockではlock/unlock、kind=powerではon/offだけを受け付けます。
+      operationId: operateDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              additionalProperties: false
+              properties:
+                action: {type: string, enum: [lock, unlock, on, off]}
       responses:
-        "200":
-          description: 施錠コマンド送信成功
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AccessControlAllowOrigin"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActionResult"
-              example:
-                ok: true
-                action: lock
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "502":
-          $ref: "#/components/responses/SwitchBotFailure"
-
-  /unlock:
-    post:
-      tags:
-        - Lock
-      operationId: unlockDoor
-      summary: スマートロックを解錠
-      description: 実行前にクライアント側で利用者へ確認することを推奨します。
-      security:
-        - firebaseJwt: []
-      responses:
-        "200":
-          description: 解錠コマンド送信成功
-          headers:
-            Access-Control-Allow-Origin:
-              $ref: "#/components/headers/AccessControlAllowOrigin"
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ActionResult"
-              example:
-                ok: true
-                action: unlock
-        "401":
-          $ref: "#/components/responses/Unauthorized"
-        "403":
-          $ref: "#/components/responses/Forbidden"
-        "502":
-          $ref: "#/components/responses/SwitchBotFailure"
-
+        "200": {description: コマンド送信完了}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "403": {$ref: "#/components/responses/Forbidden"}
+        "404": {$ref: "#/components/responses/NotFound"}
 components:
   securitySchemes:
     firebaseJwt:
       type: http
       scheme: bearer
       bearerFormat: JWT
-      description: |-
-        Firebaseプロジェクト`takoyaki3-auth`が発行したIDトークン。
-        Lambda AuthorizerがFirebase公開鍵で署名とclaimsを検証します。
-
-  headers:
-    AccessControlAllowOrigin:
-      description: 許可されたCORS Origin
-      schema:
-        type: string
-        example: "*"
-
+      description: Firebase ID token。Lambda Authorizerが公開鍵、署名、issuer、audience、有効期限を検証します。
+  parameters:
+    DeviceName:
+      name: device
+      in: path
+      required: true
+      description: 利用者が設定した1～64文字の論理名称（スラッシュ不可）
+      schema: {type: string, minLength: 1, maxLength: 64}
   schemas:
-    LockStatus:
+    CatalogDevice:
       type: object
-      required:
-        - user
+      required: [deviceId, deviceName, deviceType, source]
       properties:
-        lockState:
-          type: string
-          description: SwitchBotが返したロック状態
-          example: locked
-        user:
-          type: string
-          format: email
-          description: 操作を要求した認証済みユーザー
-      additionalProperties: true
-
-    ActionResult:
+        deviceId: {type: string}
+        deviceName: {type: string}
+        deviceType: {type: string}
+        source: {type: string, enum: [physical, infrared]}
+    ConfiguredDevice:
       type: object
-      required:
-        - ok
-        - action
+      required: [device_name, device_id, kind, actions]
       properties:
-        ok:
-          type: boolean
-          enum:
-            - true
-        action:
-          type: string
-          enum:
-            - lock
-            - unlock
-      additionalProperties: false
-
+        device_name: {type: string}
+        device_id: {type: string}
+        kind: {type: string, enum: [lock, power]}
+        switchbot_name: {type: string}
+        device_type: {type: string}
+        source: {type: string, enum: [physical, infrared]}
+        actions: {type: array, items: {type: string, enum: [lock, unlock, on, off]}}
     Error:
       type: object
-      required:
-        - message
-      properties:
-        message:
-          type: string
-      additionalProperties: false
-
+      required: [message]
+      properties: {message: {type: string}}
   responses:
-    Unauthorized:
-      description: JWTがない、またはJWTの検証に失敗
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AccessControlAllowOrigin"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
-
-    Forbidden:
-      description: 認証済みだが許可メールアドレスに含まれていない
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AccessControlAllowOrigin"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
-          example:
-            message: このユーザーには操作権限がありません
-
-    SwitchBotFailure:
-      description: SwitchBot APIの呼び出しに失敗
-      headers:
-        Access-Control-Allow-Origin:
-          $ref: "#/components/headers/AccessControlAllowOrigin"
-      content:
-        application/json:
-          schema:
-            $ref: "#/components/schemas/Error"
-          example:
-            message: SwitchBotの操作に失敗しました
+    BadRequest: {description: 入力が不正, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    Unauthorized: {description: JWTがない、または検証失敗, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    Forbidden: {description: 許可メールアドレスに含まれない, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}
+    NotFound: {description: 論理デバイスが未設定, content: {application/json: {schema: {$ref: "#/components/schemas/Error"}}}}

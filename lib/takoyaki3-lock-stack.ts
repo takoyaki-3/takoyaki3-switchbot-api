@@ -1,7 +1,12 @@
 import * as path from 'node:path';
 import * as cdk from 'aws-cdk-lib';
 import * as apigw from 'aws-cdk-lib/aws-apigateway';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import { Construct } from 'constructs';
 
 export class Takoyaki3LockStack extends cdk.Stack {
@@ -19,11 +24,6 @@ export class Takoyaki3LockStack extends cdk.Stack {
       noEcho: true,
       description: 'SwitchBot API signing secret',
     });
-    const switchBotDeviceId = new cdk.CfnParameter(this, 'SwitchBotDeviceId', {
-      type: 'String',
-      noEcho: true,
-      description: 'SwitchBot lock device ID',
-    });
     const allowedEmails = new cdk.CfnParameter(this, 'AllowedEmails', {
       type: 'CommaDelimitedList',
       noEcho: true,
@@ -33,16 +33,13 @@ export class Takoyaki3LockStack extends cdk.Stack {
       type: 'String',
       default: 'takoyaki3-auth',
     });
-    const authLoginUrl = new cdk.CfnParameter(this, 'AuthLoginUrl', {
-      type: 'String',
-      default: 'https://takoyaki3-auth.web.app',
-      allowedPattern: '^https://[^/]+(?:/.*)?$',
-    });
-    const publicBaseUrl = new cdk.CfnParameter(this, 'PublicBaseUrl', {
-      type: 'String',
-      default: 'https://lock.takoyaki3.com',
-      description: 'Public HTTPS URL exposed by the reverse proxy (without trailing slash)',
-      allowedPattern: '^https://[^/]+$',
+
+    const deviceTable = new dynamodb.Table(this, 'DeviceTable', {
+      partitionKey: { name: 'device_name', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
     // Lambdaコード専用ディレクトリをそのままデプロイパッケージにする。
@@ -56,12 +53,11 @@ export class Takoyaki3LockStack extends cdk.Stack {
       environment: {
         SWITCHBOT_TOKEN: switchBotToken.valueAsString,
         SWITCHBOT_SECRET: switchBotSecret.valueAsString,
-        SWITCHBOT_DEVICE_ID: switchBotDeviceId.valueAsString,
+        DEVICE_TABLE_NAME: deviceTable.tableName,
         ALLOWED_EMAILS: cdk.Fn.join(',', allowedEmails.valueAsList),
-        AUTH_LOGIN_URL: authLoginUrl.valueAsString,
-        PUBLIC_BASE_URL: publicBaseUrl.valueAsString,
       },
     });
+    deviceTable.grantReadWriteData(lockFunction);
 
     // REST APIではネイティブJWT Authorizerがないため、同じコードの検証用ハンドラーを使う。
     const authFunction = new lambda.Function(this, 'AuthFunction', {
@@ -87,7 +83,7 @@ export class Takoyaki3LockStack extends cdk.Stack {
       },
       defaultCorsPreflightOptions: {
         allowHeaders: ['Authorization', 'Content-Type'],
-        allowMethods: ['GET', 'POST', 'OPTIONS'],
+        allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         allowOrigins: apigw.Cors.ALL_ORIGINS,
       },
     });
@@ -96,7 +92,7 @@ export class Takoyaki3LockStack extends cdk.Stack {
     const gatewayResponseHeaders = {
       'Access-Control-Allow-Origin': "'*'",
       'Access-Control-Allow-Headers': "'Authorization,Content-Type'",
-      'Access-Control-Allow-Methods': "'GET,POST,OPTIONS'",
+      'Access-Control-Allow-Methods': "'GET,POST,PUT,DELETE,OPTIONS'",
     };
     api.addGatewayResponse('Default4xxResponse', {
       type: apigw.ResponseType.DEFAULT_4XX,
@@ -119,20 +115,63 @@ export class Takoyaki3LockStack extends cdk.Stack {
       authorizationType: apigw.AuthorizationType.CUSTOM,
     };
 
-    // 認証開始と操作画面の配信は公開し、実際の鍵操作だけJWTを必須にする。
-    api.root.addMethod('GET', integration);
-    api.root.addResource('control').addMethod('GET', integration);
     api.root.addResource('status').addMethod('GET', integration, protectedMethodOptions);
     api.root.addResource('lock').addMethod('POST', integration, protectedMethodOptions);
     api.root.addResource('unlock').addMethod('POST', integration, protectedMethodOptions);
+    const devices = api.root.addResource('devices');
+    devices.addMethod('GET', integration, protectedMethodOptions);
+    const device = devices.addResource('{device}');
+    device.addMethod('PUT', integration, protectedMethodOptions);
+    device.addMethod('DELETE', integration, protectedMethodOptions);
+    device.addResource('status').addMethod('GET', integration, protectedMethodOptions);
+    device.addResource('actions').addMethod('POST', integration, protectedMethodOptions);
+    api.root.addResource('catalog').addResource('devices')
+      .addMethod('GET', integration, protectedMethodOptions);
+
+    const webBucket = new s3.Bucket(this, 'WebBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+    const apiBehavior: cloudfront.BehaviorOptions = {
+      origin: new origins.HttpOrigin(
+        `${api.restApiId}.execute-api.${this.region}.${this.urlSuffix}`,
+        { originPath: '/prod', protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY },
+      ),
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+    };
+    const distribution = new cloudfront.Distribution(this, 'WebDistribution', {
+      defaultRootObject: 'index.html',
+      defaultBehavior: {
+        origin: origins.S3BucketOrigin.withOriginAccessControl(webBucket),
+        viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+        allowedMethods: cloudfront.AllowedMethods.ALLOW_GET_HEAD_OPTIONS,
+        cachePolicy: cloudfront.CachePolicy.CACHING_OPTIMIZED,
+        responseHeadersPolicy: cloudfront.ResponseHeadersPolicy.SECURITY_HEADERS,
+      },
+      additionalBehaviors: {
+        'catalog*': apiBehavior,
+        'devices*': apiBehavior,
+      },
+    });
+    new s3deploy.BucketDeployment(this, 'DeployWeb', {
+      sources: [s3deploy.Source.asset(path.join(__dirname, '..', 'cloudflare-pages'))],
+      destinationBucket: webBucket,
+      distribution,
+      distributionPaths: ['/*'],
+    });
 
     new cdk.CfnOutput(this, 'ApiUrl', {
       description: 'API Gateway origin URL for the reverse proxy',
       value: api.url,
     });
-    new cdk.CfnOutput(this, 'PublicUrl', {
-      description: 'Public URL to open in a browser',
-      value: publicBaseUrl.valueAsString,
+    new cdk.CfnOutput(this, 'WebUrl', {
+      description: 'CloudFront default URL for the stateless web UI',
+      value: `https://${distribution.distributionDomainName}`,
     });
   }
 }

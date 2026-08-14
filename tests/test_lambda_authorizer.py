@@ -79,10 +79,12 @@ class FirebaseJwtTests(unittest.TestCase):
         "ALLOWED_EMAILS": "owner@example.com",
         "SWITCHBOT_TOKEN": "token",
         "SWITCHBOT_SECRET": "secret",
-        "SWITCHBOT_DEVICE_ID": "lock-1",
+    })
+    @patch("lambda_function._get_configured_device", return_value={
+        "device_name": "lock", "device_id": "lock-1", "kind": "lock",
     })
     @patch("lambda_function.SwitchBotClient")
-    def test_rest_api_unlock_route_uses_authorizer_context(self, client_class):
+    def test_rest_api_unlock_route_uses_authorizer_context(self, client_class, _device):
         response = lambda_function.handler({
             "httpMethod": "POST",
             "resource": "/unlock",
@@ -94,7 +96,83 @@ class FirebaseJwtTests(unittest.TestCase):
         }, None)
 
         self.assertEqual(response["statusCode"], 200)
-        client_class.return_value.set_locked.assert_called_once_with(False)
+        client_class.return_value.command.assert_called_once_with("lock-1", "unlock")
+
+    @patch.dict(os.environ, {
+        "ALLOWED_EMAILS": "owner@example.com",
+        "SWITCHBOT_TOKEN": "token",
+        "SWITCHBOT_SECRET": "secret",
+    })
+    @patch("lambda_function._get_configured_device", return_value={
+        "device_name": "light", "device_id": "light-1", "kind": "power",
+    })
+    @patch("lambda_function.SwitchBotClient")
+    def test_light_on_maps_to_switchbot_turn_on(self, client_class, _device):
+        response = lambda_function.handler({
+            "httpMethod": "POST",
+            "resource": "/devices/{device}/actions",
+            "pathParameters": {"device": "light"},
+            "body": json.dumps({"action": "on"}),
+            "requestContext": {"authorizer": {
+                "sub": "firebase-user-1",
+                "email": "owner@example.com",
+                "email_verified": "true",
+            }},
+        }, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        client_class.return_value.command.assert_called_once_with("light-1", "turnOn")
+
+    @patch.dict(os.environ, {
+        "ALLOWED_EMAILS": "owner@example.com",
+        "SWITCHBOT_TOKEN": "token",
+        "SWITCHBOT_SECRET": "secret",
+    })
+    @patch("lambda_function._get_configured_device", return_value={
+        "device_name": "fan", "device_id": "fan-1", "kind": "power",
+    })
+    @patch("lambda_function.SwitchBotClient")
+    def test_lock_action_is_not_available_for_fan(self, client_class, _device):
+        response = lambda_function.handler({
+            "httpMethod": "POST",
+            "resource": "/devices/{device}/actions",
+            "pathParameters": {"device": "fan"},
+            "body": json.dumps({"action": "unlock"}),
+            "requestContext": {"authorizer": {
+                "sub": "firebase-user-1",
+                "email": "owner@example.com",
+                "email_verified": "true",
+            }},
+        }, None)
+
+        self.assertEqual(response["statusCode"], 400)
+        client_class.return_value.command.assert_not_called()
+
+    @patch.dict(os.environ, {
+        "ALLOWED_EMAILS": "owner@example.com",
+        "SWITCHBOT_TOKEN": "token",
+        "SWITCHBOT_SECRET": "secret",
+    })
+    @patch("lambda_function._table")
+    @patch("lambda_function.SwitchBotClient")
+    def test_device_can_be_registered_from_switchbot_catalog(self, client_class, table):
+        client_class.return_value.devices.return_value = [{
+            "deviceId": "device-1", "deviceName": "リビング", "deviceType": "Bot",
+            "source": "physical",
+        }]
+        response = lambda_function.handler({
+            "httpMethod": "PUT",
+            "resource": "/devices/{device}",
+            "pathParameters": {"device": "照明"},
+            "body": json.dumps({"deviceId": "device-1", "kind": "power"}),
+            "requestContext": {"authorizer": {
+                "sub": "firebase-user-1", "email": "owner@example.com",
+                "email_verified": "true",
+            }},
+        }, None)
+
+        self.assertEqual(response["statusCode"], 200)
+        table.return_value.put_item.assert_called_once()
 
 
 if __name__ == "__main__":
