@@ -3,7 +3,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { HttpLambdaIntegration } from 'aws-cdk-lib/aws-apigatewayv2-integrations';
-import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import { Construct } from 'constructs';
 
@@ -12,14 +11,24 @@ export class Takoyaki3LockStack extends cdk.Stack {
     super(scope, id, props);
 
     // 環境ごとに変わる値はCloudFormationパラメータで受け取り、ソースへ埋め込まない。
-    const switchBotSecretArn = new cdk.CfnParameter(this, 'SwitchBotSecretArn', {
+    const switchBotToken = new cdk.CfnParameter(this, 'SwitchBotToken', {
       type: 'String',
       noEcho: true,
-      description: 'ARN of a Secrets Manager secret containing token, secret, and device_id',
-      allowedPattern: '^arn:[^:]+:secretsmanager:[^:]+:[0-9]{12}:secret:.+$',
+      description: 'SwitchBot API token',
+    });
+    const switchBotSecret = new cdk.CfnParameter(this, 'SwitchBotSecret', {
+      type: 'String',
+      noEcho: true,
+      description: 'SwitchBot API signing secret',
+    });
+    const switchBotDeviceId = new cdk.CfnParameter(this, 'SwitchBotDeviceId', {
+      type: 'String',
+      noEcho: true,
+      description: 'SwitchBot lock device ID',
     });
     const allowedEmails = new cdk.CfnParameter(this, 'AllowedEmails', {
       type: 'CommaDelimitedList',
+      noEcho: true,
       description: 'Firebase email addresses permitted to operate the lock',
     });
     const firebaseProjectId = new cdk.CfnParameter(this, 'FirebaseProjectId', {
@@ -47,18 +56,14 @@ export class Takoyaki3LockStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(15),
       memorySize: 128,
       environment: {
-        SWITCHBOT_SECRET_ARN: switchBotSecretArn.valueAsString,
+        SWITCHBOT_TOKEN: switchBotToken.valueAsString,
+        SWITCHBOT_SECRET: switchBotSecret.valueAsString,
+        SWITCHBOT_DEVICE_ID: switchBotDeviceId.valueAsString,
         ALLOWED_EMAILS: cdk.Fn.join(',', allowedEmails.valueAsList),
         AUTH_LOGIN_URL: authLoginUrl.valueAsString,
         PUBLIC_BASE_URL: publicBaseUrl.valueAsString,
       },
     });
-
-    // SwitchBot資格情報を格納した指定シークレットだけに読み取り権限を限定する。
-    lockFunction.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [switchBotSecretArn.valueAsString],
-    }));
 
     // リバースプロキシの転送先となるHTTP API。ステージ名をURLへ含めない。
     const api = new apigwv2.HttpApi(this, 'LockApi', {

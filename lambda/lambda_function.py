@@ -103,7 +103,6 @@ class SwitchBotClient:
         )
 
 
-_secret_cache: Config | None = None
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
@@ -129,21 +128,12 @@ def _response(status: int, body: Any, content_type: str = "application/json") ->
 
 
 def _config() -> Config:
-    """Secrets Managerから設定を取得し、同一実行環境では再利用する。"""
-    global _secret_cache
-    if _secret_cache is not None:
-        return _secret_cache
-    value = _get_secret_value(os.environ["SWITCHBOT_SECRET_ARN"])
-    secret = json.loads(value["SecretString"])
-    _secret_cache = Config(secret["token"], secret["secret"], secret["device_id"])
-    return _secret_cache
-
-
-def _get_secret_value(secret_id: str) -> dict[str, Any]:
-    # boto3はLambdaのPythonランタイムに同梱されるため、デプロイ物へ含めない。
-    import boto3
-
-    return boto3.client("secretsmanager").get_secret_value(SecretId=secret_id)
+    """GitHub Actionsから設定されたLambda環境変数を読み込む。"""
+    return Config(
+        token=os.environ["SWITCHBOT_TOKEN"],
+        secret=os.environ["SWITCHBOT_SECRET"],
+        device_id=os.environ["SWITCHBOT_DEVICE_ID"],
+    )
 
 
 def _claims(event: dict[str, Any]) -> dict[str, Any]:
