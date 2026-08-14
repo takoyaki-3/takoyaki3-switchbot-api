@@ -122,3 +122,21 @@ IAMロールの信頼ポリシーは、このリポジトリの `main` ブラン
 ```
 
 このIAMロールには、CDK bootstrapで作成されたデプロイロールとファイル公開ロールを引き受ける権限など、CDKデプロイに必要な権限を付与してください。
+
+## デプロイ後のAPI確認
+
+AWS CLIで認証した環境から次を実行します。CloudFormationスタックの出力からAPI URLを取得した後、Firebase JWTの入力を求められます。貼り付けたJWTは画面やコマンド履歴には表示されません。
+
+```powershell
+python scripts/verify_deployment.py
+```
+
+AWS CLIプロファイルやスタック名を指定する場合:
+
+```powershell
+python scripts/verify_deployment.py `
+  --profile my-profile `
+  --stack-name Takoyaki3LockStack
+```
+
+スクリプトは認証が必要な`GET /status`だけを呼び出し、鍵の状態は変更しません。JWTには`ALLOWED_EMAILS`で許可した検証済みメールアドレスのユーザーを指定してください。
